@@ -16,7 +16,7 @@ src/document_parser/
 ├── py.typed             # 타입힌트 배포 마커
 │
 ├── core/                # 공유 계약 레이어 (두 엔진이 의존하는 유일한 모듈)
-│   ├── models.py        #   ParsedDocument, DocumentElement, Segment,
+│   ├── models.py        #   ParsedDocument, DocumentElement(+BBox), Segment,
 │   │                    #   Chunk, ChunkingConfig (모두 Pydantic)
 │   └── exceptions.py    #   DocumentParserError 및 하위 예외 타입
 │
@@ -25,7 +25,17 @@ src/document_parser/
 │   ├── graph.py         #   LangGraph 그래프 조립 (내부 구현)
 │   ├── state.py         #   ParsingState (내부 구현)
 │   ├── nodes/           #   detect_format -> extract -> assemble
+│   ├── weights.py       #   PP-DocLayoutV2 가중치 다운로드 ('layout' extra)
+│   ├── clients/         #   azure_document_intelligence.py / vlm.py — 외부 SDK 호출부만
+│   │                    #   분리(연동 교체 시 여기만 바꾸면 됨, DocumentElement 매핑과 무관)
 │   └── loaders/         #   포맷별 로더 (txt/md 내장, pdf는 extra)
+│       └── pdf/         #     레이아웃 분석 후 페이지별 분기(로더 내부 구현,
+│                         #     LangGraph 아님 — 평범한 파이썬 함수 호출):
+│                         #     layout.py   PP-DocLayoutV2 (가중치 없으면 pymupdf
+│                         #                 휴리스틱으로 자동 폴백)
+│                         #     native.py   텍스트 레이어 있는 페이지
+│                         #     azure_di.py 그림 포함 / 스캔 페이지 (Azure DI, 'azure' extra)
+│                         #     vlm.py      〃 (VLM 캡션, 'vlm' extra)
 │
 ├── chunking/            # 청킹 엔진: Segment -> Chunk (parsing과 독립)
 │   ├── engine.py        #   ChunkingEngine 파사드 (chunk / achunk)
@@ -74,11 +84,25 @@ core                   (계약 모델 · 예외)
 pip install "document-parser @ git+ssh://git@<repo-url>@<tag>"
 
 # 포맷별 optional extras
-pip install "document-parser[pdf] @ ..."   # PDF 지원 (pymupdf)
+pip install "document-parser[pdf] @ ..."     # PDF 지원 (pymupdf)
+pip install "document-parser[layout] @ ..."  # PP-DocLayoutV2 레이아웃 분석 (아래 "모델 웨이트" 참고)
+pip install "document-parser[azure] @ ..."   # Azure Document Intelligence 연동
+pip install "document-parser[vlm] @ ..."     # VLM(Gemini) 그림 캡션 연동
 ```
 
 기본 설치의 의존성은 `langgraph`, `pydantic`뿐입니다. fastapi/uvicorn은 딸려가지
 않습니다.
+
+`azure`/`vlm` extra는 SDK만 설치할 뿐, 실제 호출엔 아래 환경변수가 필요합니다
+(in4u Azure 배포 기준):
+
+| 연동 | 환경변수 |
+|---|---|
+| Azure Document Intelligence | `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`, `AZURE_DOCUMENT_INTELLIGENCE_KEY` |
+| VLM (Gemini flash lite 3.5, Azure 경유) | `AZURE_VLM_ENDPOINT`, `AZURE_VLM_API_KEY` |
+
+둘 다 자격증명이 없으면 `MissingDependencyError`를 던집니다(SDK 미설치 시와 동일한
+예외 타입 — "이 연동을 쓰려면 설정이 더 필요하다"는 의미로 재사용).
 
 ## 사용법
 
@@ -132,6 +156,19 @@ pip install "document-parser[layout] @ ..."
 document-parser download-models                          # 기본 캐시 경로에 다운로드
 document-parser download-models --dest /opt/models      # 경로 지정
 ```
+
+`layout` extra는 huggingface_hub + paddleocr까지만 설치합니다. **실제 추론엔
+paddlepaddle이 추가로 필요**하고, paddlepaddle은 일반 PyPI 인덱스가 아니라
+전용 인덱스에서 받아야 해서 별도 설치 단계가 필요합니다(공급망 검토는 아직 보류 —
+팀 결정에 따라 가중치를 미리 받아두는 방식으로 우선 진행):
+
+```bash
+pip install paddlepaddle==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+```
+
+paddlepaddle 없이 `layout` extra만 설치돼 있으면 `layout.analyze_page()`는 자동으로
+pymupdf 휴리스틱으로 폴백합니다(에러 없음) — paddleocr는 설치돼 있는데 가중치만
+없는 경우엔 (실수로 보고) 에러를 던집니다.
 
 - **미리 받아두세요.** 용량이 커서 첫 요청 시점에 받게 두면 안 됩니다. 배포
   스크립트나 Docker 이미지 빌드 단계에서 실행해 레이어로 캐시하는 것을

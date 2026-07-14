@@ -11,11 +11,27 @@ dependencies = [
 
 [project.optional-dependencies]
 pdf = ["pymupdf>=1.24"]
-layout = ["huggingface_hub>=0.26"]
+# NOTE: 'layout' does not fully install PP-DocLayoutV2 -- paddlepaddle itself is
+# not on this list because it isn't published to a normal PyPI index. Install
+# it separately from PaddlePaddle's own index (supply-chain review pending,
+# deferred for now per team decision):
+#   pip install paddlepaddle==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+# Without it, layout.analyze_page() falls back to a pymupdf-only heuristic.
+layout = [
+    "huggingface_hub>=0.26",
+    "onnxruntime>=1.19",
+    "paddleocr[doc-parser]>=3.4.0,<3.5.0",
+]
 api = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",
+]
+azure = [
+    "azure-ai-documentintelligence>=1.0.0",
+]
+vlm = [
+    "google-genai>=0.3",
 ]
 
 [project.scripts]

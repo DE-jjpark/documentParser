@@ -6,6 +6,7 @@ from document_parser import Chunk, ParsedDocument
 
 def test_public_api_surface():
     expected = {
+        "BBox",
         "Chunk",
         "ChunkingConfig",
         "ChunkingEngine",

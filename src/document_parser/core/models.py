@@ -18,12 +18,29 @@ class ElementType(StrEnum):
     IMAGE = "image"
 
 
+class BBox(BaseModel):
+    """Axis-aligned bounding box in the source page's native coordinate space."""
+
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
 class DocumentElement(BaseModel):
-    """A single structural unit extracted from a source document."""
+    """A single structural unit extracted from a source document.
+
+    ``bboxes`` is a list, not a single optional box: one element can
+    legitimately span multiple regions (e.g. an Azure Document Intelligence
+    paragraph that wraps across a column break has multiple
+    ``bounding_regions``). Empty means "no region info" (e.g. txt/md, which
+    have no coordinate space at all).
+    """
 
     type: ElementType = ElementType.TEXT
     text: str
     page: int | None = None
+    bboxes: list[BBox] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
