@@ -12,12 +12,13 @@ since they need real Azure credentials this environment doesn't have.
 
 from unittest.mock import patch
 
-import pymupdf
 import pytest
 
-from document_parser import ElementType, ParsingEngine
-from document_parser.core.models import BBox, DocumentElement
-from document_parser.parsing.loaders.pdf.layout import PageLayout, needs_heavy_path
+pymupdf = pytest.importorskip("pymupdf", reason="pdf extra not installed")
+
+from document_parser import ElementType, ParsingEngine  # noqa: E402
+from document_parser.core.models import BBox, DocumentElement  # noqa: E402
+from document_parser.parsing.loaders.pdf.layout import PageLayout, needs_heavy_path  # noqa: E402
 
 
 def _text_only_pdf() -> bytes:

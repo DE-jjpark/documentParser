@@ -5,9 +5,15 @@ which gives per-block bounding boxes for free, instead of the whole-page
 ``page.get_text()`` string the previous loader used.
 """
 
-import pymupdf
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from document_parser.core.models import BBox, DocumentElement, ElementType
+
+if TYPE_CHECKING:
+    # type hints only -- see layout.py's comment for why this stays lazy.
+    import pymupdf
 
 
 def extract_native(page: pymupdf.Page, page_number: int) -> list[DocumentElement]:

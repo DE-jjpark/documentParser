@@ -14,14 +14,22 @@ pyproject.toml) -- deferred supply-chain review, not blocking here per team
 decision: pre-download the weights and bring them along.
 """
 
+from __future__ import annotations
+
 import tempfile
 from dataclasses import dataclass, field
 from functools import lru_cache
-
-import pymupdf
+from typing import TYPE_CHECKING
 
 from document_parser.core.exceptions import MissingDependencyError
 from document_parser.parsing.weights import layout_model_dir
+
+if TYPE_CHECKING:
+    # pymupdf is only needed for the type hints below -- this module never
+    # constructs pymupdf objects itself, only calls methods on a `page` the
+    # caller already has. Keeping the import out of the runtime path means
+    # `document_parser` stays importable without the 'pdf' extra installed.
+    import pymupdf
 
 # PP-DocLayoutV2's 25 labels, bucketed the same way the sibling skep_parser
 # project's DP-Bench comparison did: categories that are "a picture, not

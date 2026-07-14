@@ -10,9 +10,15 @@ real client (parsing.clients.vlm, commit ec8c30d) is untouched -- swap the
 placeholder below for a call to `VLMClient` when ready to spend on it.
 """
 
-import pymupdf
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from document_parser.core.models import BBox, DocumentElement, ElementType
+
+if TYPE_CHECKING:
+    # type hints only -- see layout.py's comment for why this stays lazy.
+    import pymupdf
 
 _PLACEHOLDER_CAPTION = "[image - VLM not connected, placeholder]"
 

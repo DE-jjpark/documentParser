@@ -10,8 +10,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from document_parser.core.exceptions import MissingDependencyError
-from document_parser.parsing.clients.vlm import VLMClient
+pytest.importorskip("google.genai", reason="vlm extra not installed")
+
+from document_parser.core.exceptions import MissingDependencyError  # noqa: E402
+from document_parser.parsing.clients.vlm import VLMClient  # noqa: E402
 
 
 def test_missing_env_vars_raises(monkeypatch):

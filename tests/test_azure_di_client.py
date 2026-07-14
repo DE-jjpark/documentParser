@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from document_parser.core.exceptions import MissingDependencyError
-from document_parser.parsing.clients.azure_document_intelligence import (
+pytest.importorskip("azure.ai.documentintelligence", reason="azure extra not installed")
+
+from document_parser.core.exceptions import MissingDependencyError  # noqa: E402
+from document_parser.parsing.clients.azure_document_intelligence import (  # noqa: E402
     AzureDocumentIntelligenceClient,
     _polygon_to_bbox,
 )
