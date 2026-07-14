@@ -1,28 +1,131 @@
 # documentParser
 
-A document parsing toolkit.
+문서 파싱 엔진과 청킹 엔진을 제공하는 파이썬 라이브러리입니다. 백엔드 서비스에서
+`import`해서 사용하는 것이 기본 사용 방식이며, 동봉된 FastAPI 앱은 로컬 테스트
+전용입니다.
 
-## Requirements
+두 엔진은 각각 LangGraph 그래프로 구현되어 있고 서로 완전히 독립적입니다.
+공유하는 것은 `core`의 계약 모델(Pydantic)뿐이며, 이 경계는 import-linter로 CI에서
+강제됩니다.
+
+## 프로젝트 구조
+
+```
+src/document_parser/
+├── __init__.py          # 공개 API 전부 — 여기서 재수출되는 것만 지원 계약
+├── py.typed             # 타입힌트 배포 마커
+│
+├── core/                # 공유 계약 레이어 (두 엔진이 의존하는 유일한 모듈)
+│   ├── models.py        #   ParsedDocument, DocumentElement, Segment,
+│   │                    #   Chunk, ChunkingConfig (모두 Pydantic)
+│   └── exceptions.py    #   DocumentParserError 및 하위 예외 타입
+│
+├── parsing/             # 파싱 엔진: 문서 바이트 -> ParsedDocument
+│   ├── engine.py        #   ParsingEngine 파사드 (parse / aparse)
+│   ├── graph.py         #   LangGraph 그래프 조립 (내부 구현)
+│   ├── state.py         #   ParsingState (내부 구현)
+│   ├── nodes/           #   detect_format -> extract -> assemble
+│   └── loaders/         #   포맷별 로더 (txt/md 내장, pdf는 extra)
+│
+├── chunking/            # 청킹 엔진: Segment -> Chunk (parsing과 독립)
+│   ├── engine.py        #   ChunkingEngine 파사드 (chunk / achunk)
+│   ├── graph.py         #   LangGraph 그래프 조립 (내부 구현)
+│   ├── state.py         #   ChunkingState (내부 구현)
+│   ├── nodes/           #   split -> finalize
+│   └── strategies/      #   분할 전략 레지스트리 (recursive 내장)
+│
+├── pipeline/            # 조합 레이어: 두 엔진을 모두 아는 유일한 곳
+│   └── ingest.py        #   IngestPipeline (parse -> chunk), document_to_segments
+│
+├── api/                 # 로컬 테스트용 FastAPI 앱 ('api' extra 필요)
+│   ├── main.py          #   앱 팩토리 + lifespan (엔진 1회 생성)
+│   ├── deps.py          #   엔진 주입, 예외 -> HTTP 에러 매핑
+│   └── routes/          #   POST /v1/parse, /v1/chunk, /v1/ingest
+│
+└── cli.py               # document-parser parse|ingest
+```
+
+### 아키텍처 규칙
+
+의존 방향은 아래로만 흐릅니다. `parsing`과 `chunking`은 서로 import할 수 없으며,
+LangGraph 관련 코드(graph, state, nodes)는 전부 엔진 내부 구현으로 공개 API에
+노출되지 않습니다.
+
+```
+api | cli
+    ↓
+pipeline
+    ↓
+parsing | chunking     (서로 독립)
+    ↓
+core                   (계약 모델 · 예외)
+```
+
+`uv run lint-imports`가 이 규칙을 검사합니다.
+
+## 요구사항
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
 
-## Setup
+## 설치 (라이브러리 소비자)
 
 ```bash
-uv sync
+pip install "document-parser @ git+ssh://git@<repo-url>@<tag>"
+
+# 포맷별 optional extras
+pip install "document-parser[pdf] @ ..."   # PDF 지원 (pymupdf)
 ```
 
-## Usage
+기본 설치의 의존성은 `langgraph`, `pydantic`뿐입니다. fastapi/uvicorn은 딸려가지
+않습니다.
 
-```bash
-uv run document-parser --help
+## 사용법
+
+```python
+from document_parser import ChunkingConfig, ChunkingEngine, IngestPipeline, ParsingEngine
+
+# 앱 시작 시 1회 생성 (그래프 컴파일 포함) 후 재사용 — 동시 호출 안전
+parsing = ParsingEngine()
+chunking = ChunkingEngine()
+
+# 파싱만
+document = await parsing.aparse("report.pdf")            # 경로에서 읽기
+document = await parsing.aparse("doc.md", data=raw)      # 바이트 직접 전달
+
+# 청킹만 (파싱 결과가 아니어도 됨)
+chunks = await chunking.achunk("아무 텍스트", ChunkingConfig(chunk_size=500))
+
+# 파싱 -> 청킹 한 번에
+pipeline = IngestPipeline(parsing, chunking)
+chunks = await pipeline.aingest("report.pdf", config=ChunkingConfig(chunk_size=500))
 ```
 
-## Development
+동기 환경에서는 `parse()` / `chunk()` / `ingest()`를 사용합니다. 모든 공개 API는
+`DocumentParserError`의 하위 예외만 던집니다 (`UnsupportedFormatError`,
+`MissingDependencyError`, `ParsingFailedError`, `ChunkingFailedError`).
+
+## 로컬 테스트 API
 
 ```bash
-uv run pytest        # run tests
-uv run ruff check    # lint
-uv run ruff format   # format
+uv sync --extra api
+uv run uvicorn document_parser.api.main:app --reload
+# Swagger UI: http://localhost:8000/docs
+```
+
+## CLI
+
+```bash
+uv run document-parser parse <file>                      # ParsedDocument JSON 출력
+uv run document-parser ingest <file> --chunk-size 500    # Chunk 목록 JSON 출력
+```
+
+## 개발
+
+```bash
+uv sync --extra api    # 개발 환경 설치
+uv run pytest          # 테스트
+uv run ruff check      # 린트
+uv run ruff format     # 포맷
+uv run lint-imports    # 아키텍처 경계 검사
 ```

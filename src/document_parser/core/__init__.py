@@ -1,10 +1,5 @@
-"""document-parser: document parsing and chunking engines.
+"""Shared contract layer: the only module both engines may depend on."""
 
-Everything re-exported here is the public, supported API. Anything imported
-from submodules directly is internal and may change without notice.
-"""
-
-from document_parser.chunking import ChunkingEngine
 from document_parser.core.exceptions import (
     ChunkingFailedError,
     DocumentParserError,
@@ -20,25 +15,17 @@ from document_parser.core.models import (
     ParsedDocument,
     Segment,
 )
-from document_parser.parsing import ParsingEngine
-from document_parser.pipeline import IngestPipeline
-
-__version__ = "0.1.0"
 
 __all__ = [
     "Chunk",
     "ChunkingConfig",
-    "ChunkingEngine",
     "ChunkingFailedError",
     "DocumentElement",
     "DocumentParserError",
     "ElementType",
-    "IngestPipeline",
     "MissingDependencyError",
     "ParsedDocument",
-    "ParsingEngine",
     "ParsingFailedError",
     "Segment",
     "UnsupportedFormatError",
-    "__version__",
 ]
