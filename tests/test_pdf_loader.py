@@ -92,3 +92,24 @@ def test_needs_heavy_path_routing_rule():
     assert needs_heavy_path(PageLayout(has_figures=True, has_text_layer=True)) is True
     assert needs_heavy_path(PageLayout(has_figures=False, has_text_layer=False)) is True
     assert needs_heavy_path(PageLayout(has_figures=False, has_text_layer=True)) is False
+
+
+def test_azure_di_and_vlm_are_placeholders_for_now(engine):
+    """azure_di/vlm real SDK calls are intentionally disabled right now (no
+    usable in4u credentials yet, and VLM calls cost money per image) -- both
+    return a fixed placeholder instead, so parsing doesn't fail and chunking
+    still has text to work with. No mocking here: this is the actual current
+    behavior, not a stand-in for a real call."""
+    document = engine.parse("doc.pdf", data=_pdf_with_image())
+
+    azure_elements = [el for el in document.elements if el.metadata.get("source") == "azure_di"]
+    vlm_elements = [el for el in document.elements if el.metadata.get("source") == "vlm"]
+
+    assert len(azure_elements) == 1
+    assert azure_elements[0].metadata.get("stub") is True
+    assert azure_elements[0].text
+
+    assert len(vlm_elements) == 1
+    assert vlm_elements[0].metadata.get("stub") is True
+    assert vlm_elements[0].text
+    assert vlm_elements[0].bbox is not None

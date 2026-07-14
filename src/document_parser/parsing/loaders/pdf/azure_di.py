@@ -2,41 +2,28 @@
 
 Diagram note: cost is per-page regardless of crop size, so the whole page is
 sent in one request (no cropping, unlike the VLM path).
-"""
 
-from functools import lru_cache
+Temporarily short-circuited to a fixed placeholder: in4u Azure DI
+credentials aren't usable yet, so the real call is disabled for now (not
+just untested) so parsing still produces chunkable output instead of
+failing. The real client (parsing.clients.azure_document_intelligence,
+commit ec8c30d) is untouched -- swap the placeholder below for a call to
+`AzureDocumentIntelligenceClient` once credentials are ready.
+"""
 
 import pymupdf
 
-from document_parser.core.models import BBox, DocumentElement, ElementType
-from document_parser.parsing.clients.azure_document_intelligence import (
-    AzureDocumentIntelligenceClient,
-)
+from document_parser.core.models import DocumentElement, ElementType
 
-
-@lru_cache(maxsize=1)
-def _get_client() -> AzureDocumentIntelligenceClient:
-    return AzureDocumentIntelligenceClient()
+_PLACEHOLDER_TEXT = "[Azure Document Intelligence not connected - placeholder]"
 
 
 def extract_with_azure_di(page: pymupdf.Page, page_number: int) -> list[DocumentElement]:
-    client = _get_client()
-    pix = page.get_pixmap(dpi=200)
-    result = client.analyze_layout(pix.tobytes("png"))
-
-    elements: list[DocumentElement] = []
-    for paragraph in result.paragraphs:
-        bbox = None
-        if paragraph.bbox:
-            x0, y0, x1, y1 = paragraph.bbox
-            bbox = BBox(x0=x0, y0=y0, x1=x1, y1=y1)
-        elements.append(
-            DocumentElement(
-                type=ElementType.TEXT,
-                text=paragraph.text,
-                page=page_number,
-                bbox=bbox,
-                metadata={"source": "azure_di"},
-            )
+    return [
+        DocumentElement(
+            type=ElementType.TEXT,
+            text=_PLACEHOLDER_TEXT,
+            page=page_number,
+            metadata={"source": "azure_di", "stub": True},
         )
-    return elements
+    ]

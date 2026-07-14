@@ -2,24 +2,19 @@
 
 Diagram note: crop first, then send to the VLM (unlike AzureDI) -- accuracy
 is better on a tight crop than on the whole page.
-"""
 
-from functools import lru_cache
+Temporarily short-circuited to a fixed placeholder: VLM calls cost money per
+image, so real calls are disabled for now regardless of whether credentials
+exist, to avoid burning budget before this path is actually needed. The
+real client (parsing.clients.vlm, commit ec8c30d) is untouched -- swap the
+placeholder below for a call to `VLMClient` when ready to spend on it.
+"""
 
 import pymupdf
 
 from document_parser.core.models import BBox, DocumentElement, ElementType
-from document_parser.parsing.clients.vlm import VLMClient
 
-_PROMPT = (
-    "Describe the content of this figure concisely. If it's a chart, table-like "
-    "image, or diagram, describe its structure and key values."
-)
-
-
-@lru_cache(maxsize=1)
-def _get_client() -> VLMClient:
-    return VLMClient()
+_PLACEHOLDER_CAPTION = "[image - VLM not connected, placeholder]"
 
 
 def caption_figures(
@@ -27,21 +22,13 @@ def caption_figures(
     page_number: int,
     crop_boxes: list[tuple[float, float, float, float]],
 ) -> list[DocumentElement]:
-    if not crop_boxes:
-        return []
-
-    client = _get_client()
-    elements: list[DocumentElement] = []
-    for box in crop_boxes:
-        pix = page.get_pixmap(clip=pymupdf.Rect(*box), dpi=200)
-        caption = client.caption_image(pix.tobytes("png"), _PROMPT)
-        elements.append(
-            DocumentElement(
-                type=ElementType.IMAGE,
-                text=caption,
-                page=page_number,
-                bbox=BBox(x0=box[0], y0=box[1], x1=box[2], y1=box[3]),
-                metadata={"source": "vlm"},
-            )
+    return [
+        DocumentElement(
+            type=ElementType.IMAGE,
+            text=_PLACEHOLDER_CAPTION,
+            page=page_number,
+            bbox=BBox(x0=box[0], y0=box[1], x1=box[2], y1=box[3]),
+            metadata={"source": "vlm", "stub": True},
         )
-    return elements
+        for box in crop_boxes
+    ]
