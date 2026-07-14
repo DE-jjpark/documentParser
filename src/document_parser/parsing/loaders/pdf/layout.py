@@ -78,22 +78,48 @@ _FIGURE_LABELS = {
 
 @dataclass
 class LayoutBox:
-    """감지된 영역 하나 — 25개 카테고리 중 하나(label)와 좌표(bbox)."""
+    """감지된 영역 하나 — 25개 카테고리 중 하나(label)와 좌표(bbox).
+
+    order: PP-DocLayoutV2가 매긴 읽기 순서(1부터 시작). 못 정했으면 None —
+    이 경우 bbox 위치(위→아래, 왼→오른) 기준으로 정렬한다(_reading_order_key
+    참고). 휴리스틱 폴백(paddleocr 없을 때)은 애초에 순서를 모르므로 항상
+    None이고, 감지된 이미지가 여러 개면 항상 위치 기준으로만 정렬된다.
+    """
 
     label: str
     bbox: tuple[float, float, float, float]
+    order: int | None = None
 
 
 @dataclass
 class PageLayout:
     has_figures: bool
     has_text_layer: bool
-    boxes: list[LayoutBox] = field(default_factory=list)
+    boxes: list[LayoutBox] = field(default_factory=list)  # 항상 읽기 순서로 정렬돼 있음
 
     @property
     def crop_boxes(self) -> list[LayoutBox]:
-        """그림류(_FIGURE_LABELS)만 골라낸 것 — VLM 크롭 대상."""
+        """그림류(_FIGURE_LABELS)만 골라낸 것 — VLM 크롭 대상. boxes가 이미
+        읽기 순서로 정렬돼 있어 그림이 여러 개여도 순서가 유지된다."""
         return [b for b in self.boxes if b.label in _FIGURE_LABELS]
+
+    @property
+    def text_boxes(self) -> list[LayoutBox]:
+        """그림류를 뺀 나머지(제목·본문·표 등) — 네이티브 텍스트 추출 대상."""
+        return [b for b in self.boxes if b.label not in _FIGURE_LABELS]
+
+
+def _reading_order_key(box: LayoutBox) -> tuple:
+    """order가 있으면 그걸 우선, 없으면 위치(top→bottom, left→right)로 대체.
+    order 있는 박스와 없는 박스가 섞여도 순서가 뒤엉키지 않도록 (0, order)
+    vs (1, y0, x0) 튜플로 묶어 order 있는 쪽이 항상 먼저 오게 한다."""
+    if box.order is not None:
+        return (0, box.order, 0.0, 0.0)
+    return (1, 0, box.bbox[1], box.bbox[0])
+
+
+def _sort_boxes(boxes: list[LayoutBox]) -> list[LayoutBox]:
+    return sorted(boxes, key=_reading_order_key)
 
 
 @lru_cache(maxsize=1)
@@ -109,6 +135,19 @@ def _get_model():
     return LayoutDetection(model_name="PP-DocLayoutV2", model_dir=str(model_dir))
 
 
+_RENDER_DPI = 200
+# PP-DocLayoutV2는 렌더링한 이미지의 픽셀 좌표(200dpi 기준)로 좌표를 주는데,
+# pymupdf(page.get_text(clip=...) 등)는 포인트(72dpi) 좌표를 쓴다. 이 변환을
+# 빠뜨리면 좌표가 실제 위치보다 200/72≈2.78배 어긋난 엉뚱한 영역을 가리키게
+# 된다(실제로 이 버그로 텍스트 전용 페이지에서 클립 영역이 빗나가 요소가
+# 0개 나온 적이 있어 여기서 바로잡는다).
+_PX_TO_PT = 72 / _RENDER_DPI
+
+
+def _px_to_pt(coordinate: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    return tuple(v * _PX_TO_PT for v in coordinate)
+
+
 def analyze_page(page: pymupdf.Page) -> PageLayout:
     has_text_layer = bool(page.get_text().strip())
 
@@ -117,14 +156,21 @@ def analyze_page(page: pymupdf.Page) -> PageLayout:
     except ImportError:
         return _analyze_page_heuristic(page, has_text_layer)
 
-    pix = page.get_pixmap(dpi=200)
+    pix = page.get_pixmap(dpi=_RENDER_DPI)
     with tempfile.NamedTemporaryFile(suffix=".png") as f:
         pix.save(f.name)
         (result,) = model.predict(f.name, batch_size=1, layout_nms=True)
 
-    boxes = [
-        LayoutBox(label=box["label"], bbox=tuple(box["coordinate"])) for box in result["boxes"]
-    ]
+    boxes = _sort_boxes(
+        [
+            LayoutBox(
+                label=box["label"],
+                bbox=_px_to_pt(tuple(box["coordinate"])),
+                order=box.get("order"),
+            )
+            for box in result["boxes"]
+        ]
+    )
     return PageLayout(
         has_figures=any(b.label in _FIGURE_LABELS for b in boxes),
         has_text_layer=has_text_layer,
@@ -136,9 +182,12 @@ def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLay
     """'layout' extra가 없을 때 폴백: pymupdf 전용 휴리스틱.
 
     실제 25개 카테고리를 감지할 수 없으므로, 찾아낸 래스터 이미지는 그냥
-    "image" 라벨(25개 카탈로그 중 하나)로 표시해둔다."""
+    "image" 라벨(25개 카탈로그 중 하나)로 표시해둔다. 읽기 순서는 모르므로
+    order=None으로 두고 위치 기준 정렬에 맡긴다."""
     images = page.get_images(full=True)
-    boxes = [LayoutBox(label="image", bbox=tuple(page.get_image_bbox(img))) for img in images]
+    boxes = _sort_boxes(
+        [LayoutBox(label="image", bbox=tuple(page.get_image_bbox(img))) for img in images]
+    )
     return PageLayout(
         has_figures=bool(boxes),
         has_text_layer=has_text_layer,

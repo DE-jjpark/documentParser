@@ -29,8 +29,11 @@ class PageState(TypedDict, total=False):
     page_number: int
     layout: PageLayout
     # azure_di/vlm이 같은 super-step에서 병렬 실행되며 둘 다 이 키에 쓰므로
-    # reducer(operator.add)가 없으면 LangGraph가 충돌로 처리한다.
-    elements: Annotated[list[DocumentElement], operator.add]
+    # reducer(operator.add)가 없으면 LangGraph가 충돌로 처리한다. merge
+    # 노드가 이걸 읽어 정렬한 결과를 elements(리듀서 없음, 그냥 덮어쓰기)에
+    # 담는다 — 여기에 다시 쓰면 reducer 때문에 중복으로 쌓이므로 분리해뒀다.
+    raw_elements: Annotated[list[DocumentElement], operator.add]
+    elements: list[DocumentElement]
 
 
 def _analyze(state: PageState) -> dict:
@@ -44,16 +47,34 @@ def _route(state: PageState) -> str | list[str]:
 
 
 def _native(state: PageState) -> dict:
-    return {"elements": extract_native(state["page"], state["page_number"])}
+    elements = extract_native(state["page"], state["page_number"], state["layout"])
+    return {"raw_elements": elements}
 
 
 def _azure_di(state: PageState) -> dict:
-    return {"elements": extract_with_azure_di(state["page"], state["page_number"])}
+    elements = extract_with_azure_di(state["page"], state["page_number"])
+    return {"raw_elements": elements}
 
 
 def _vlm(state: PageState) -> dict:
     boxes = state["layout"].crop_boxes
-    return {"elements": caption_figures(state["page"], state["page_number"], boxes)}
+    elements = caption_figures(state["page"], state["page_number"], boxes)
+    return {"raw_elements": elements}
+
+
+def _merge_key(element: DocumentElement) -> tuple[float, float]:
+    """azure_di와 vlm은 같은 super-step에서 병렬 실행되므로 reducer가 합친
+    직후의 순서는 어느 쪽이 먼저 끝났느냐에 달려 있어 신뢰할 수 없다 — bbox
+    위치(top→bottom, left→right) 기준으로 다시 정렬해야 실제 읽기 순서가
+    보장된다. bbox가 없는 요소(지금의 azure_di 페이지 전체 placeholder처럼
+    위치 정보가 아예 없는 경우)는 페이지 맨 위(0, 0)로 취급한다."""
+    if element.bboxes:
+        return (element.bboxes[0].y0, element.bboxes[0].x0)
+    return (0.0, 0.0)
+
+
+def _merge(state: PageState) -> dict:
+    return {"elements": sorted(state["raw_elements"], key=_merge_key)}
 
 
 def build_page_graph() -> StateGraph:
@@ -63,7 +84,7 @@ def build_page_graph() -> StateGraph:
     graph.add_node("native", _native)
     graph.add_node("azure_di", _azure_di)
     graph.add_node("vlm", _vlm)
-    graph.add_node("merge", lambda _state: {})
+    graph.add_node("merge", _merge)
 
     graph.add_edge(START, "analyze")
     graph.add_conditional_edges(

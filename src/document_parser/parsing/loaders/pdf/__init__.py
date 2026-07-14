@@ -33,6 +33,6 @@ def load(data: bytes, source: str) -> list[DocumentElement]:
     elements: list[DocumentElement] = []
     with pymupdf.open(stream=data, filetype="pdf") as doc:
         for page_number, page in enumerate(doc, start=1):
-            result = graph.invoke({"page": page, "page_number": page_number, "elements": []})
+            result = graph.invoke({"page": page, "page_number": page_number, "raw_elements": []})
             elements.extend(result["elements"])
     return elements
