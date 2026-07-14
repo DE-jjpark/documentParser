@@ -1,18 +1,24 @@
-"""Loader for PDF documents. Requires the 'pdf' extra (pymupdf).
+"""PDF 문서 로더. 'pdf' extra(pymupdf) 필요.
 
-Per page: analyze_page() decides the route (diagram: layout analysis ->
-Only Text + text layer present -> native extraction, otherwise (figures
-present, or no text layer / scanned page) -> AzureDI + VLM). See
-``layout.py`` for the routing rule and ``native.py``/``azure_di.py``/
-``vlm.py`` for the three extraction paths themselves.
+페이지마다 ``graph.py``의 LangGraph를 한 번씩 invoke한다: 레이아웃 분석 →
+(Only Text + 텍스트 레이어 있음) 네이티브 추출, 아니면(그림 있음 / 텍스트
+레이어 없음) AzureDI+VLM 병렬 실행 → 병합. 그래프는 이 함수가 반환하는
+바깥 형태(``(bytes, source) -> list[DocumentElement]``)에는 영향을 주지
+않는다 — 로더 레지스트리(parsing/loaders/__init__.py) 입장에서는 여전히
+평범한 동기 함수 하나일 뿐이다.
 """
+
+from functools import lru_cache
 
 from document_parser.core.exceptions import MissingDependencyError
 from document_parser.core.models import DocumentElement
-from document_parser.parsing.loaders.pdf.azure_di import extract_with_azure_di
-from document_parser.parsing.loaders.pdf.layout import analyze_page, needs_heavy_path
-from document_parser.parsing.loaders.pdf.native import extract_native
-from document_parser.parsing.loaders.pdf.vlm import caption_figures
+
+
+@lru_cache(maxsize=1)
+def _get_page_graph():
+    from document_parser.parsing.loaders.pdf.graph import build_page_graph
+
+    return build_page_graph().compile()
 
 
 def load(data: bytes, source: str) -> list[DocumentElement]:
@@ -23,16 +29,10 @@ def load(data: bytes, source: str) -> list[DocumentElement]:
             "PDF support requires the 'pdf' extra: pip install 'document-parser[pdf]'"
         ) from exc
 
+    graph = _get_page_graph()
     elements: list[DocumentElement] = []
     with pymupdf.open(stream=data, filetype="pdf") as doc:
         for page_number, page in enumerate(doc, start=1):
-            layout = analyze_page(page)
-            if needs_heavy_path(layout):
-                # independent I/O calls once real SDKs are wired in -- TODO:
-                # parallelize (e.g. asyncio.gather / a thread pool) instead
-                # of the sequential calls below.
-                elements.extend(extract_with_azure_di(page, page_number))
-                elements.extend(caption_figures(page, page_number, layout.crop_boxes))
-            else:
-                elements.extend(extract_native(page, page_number))
+            result = graph.invoke({"page": page, "page_number": page_number, "elements": []})
+            elements.extend(result["elements"])
     return elements

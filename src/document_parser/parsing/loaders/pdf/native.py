@@ -29,7 +29,7 @@ def extract_native(page: pymupdf.Page, page_number: int) -> list[DocumentElement
                 type=ElementType.TEXT,
                 text=text,
                 page=page_number,
-                bbox=BBox(x0=x0, y0=y0, x1=x1, y1=y1),
+                bboxes=[BBox(x0=x0, y0=y0, x1=x1, y1=y1)],
                 metadata={"source": "native"},
             )
         )

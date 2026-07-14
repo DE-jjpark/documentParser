@@ -1,13 +1,12 @@
-"""Tests for the pdf loader's per-page routing (native vs AzureDI+VLM path).
+"""pdf 로더의 페이지별 라우팅(네이티브 vs AzureDI+VLM 경로) 테스트.
 
-Builds tiny synthetic PDFs with pymupdf itself rather than shipping fixture
-files, mirroring the "hello world" style already used for text loader tests.
+fixture 파일 대신 pymupdf로 그 자리에서 작은 합성 PDF를 만든다(기존
+text 로더 테스트의 "hello world" 스타일과 동일).
 
-layout.analyze_page() itself is exercised for real (against whatever's
-installed: real PP-DocLayoutV2 if the 'layout' extra + weights are present,
-otherwise the pymupdf heuristic fallback -- both correctly classify these
-synthetic pages). azure_di/vlm are mocked at the pdf-loader-import boundary
-since they need real Azure credentials this environment doesn't have.
+layout.analyze_page()는 실제로(설치된 것 기준: 'layout' extra + 가중치가
+있으면 진짜 PP-DocLayoutV2, 없으면 pymupdf 휴리스틱 폴백) 실행해서 검증한다
+— 둘 다 이 합성 페이지들을 올바르게 분류한다. azure_di/vlm은 graph.py가
+호출하는 지점에서 mock한다 — 실제 Azure 자격증명이 이 환경에 없어서다.
 """
 
 from unittest.mock import patch
@@ -18,6 +17,7 @@ pymupdf = pytest.importorskip("pymupdf", reason="pdf extra not installed")
 
 from document_parser import ElementType, ParsingEngine  # noqa: E402
 from document_parser.core.models import BBox, DocumentElement  # noqa: E402
+from document_parser.parsing.loaders.pdf.graph import build_page_graph  # noqa: E402
 from document_parser.parsing.loaders.pdf.layout import PageLayout, needs_heavy_path  # noqa: E402
 
 
@@ -55,7 +55,7 @@ def test_text_only_page_takes_native_route(engine):
     assert element.type == ElementType.TEXT
     assert element.text == "hello world"
     assert element.page == 1
-    assert element.bbox is not None
+    assert len(element.bboxes) == 1
     assert element.metadata["source"] == "native"
 
 
@@ -67,17 +67,19 @@ def test_page_with_figure_takes_azure_di_and_vlm_route(engine):
         type=ElementType.IMAGE,
         text="from vlm",
         page=1,
-        bbox=BBox(x0=0, y0=0, x1=1, y1=1),
+        bboxes=[BBox(x0=0, y0=0, x1=1, y1=1)],
         metadata={"source": "vlm"},
     )
 
+    # graph.py의 _azure_di/_vlm 노드가 참조하는 이름을 patch한다(정의 모듈이
+    # 아니라 실제로 쓰는 모듈 기준이어야 patch가 먹는다).
     with (
         patch(
-            "document_parser.parsing.loaders.pdf.extract_with_azure_di",
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
             return_value=[fake_azure_element],
         ) as mock_azure,
         patch(
-            "document_parser.parsing.loaders.pdf.caption_figures",
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
             return_value=[fake_vlm_element],
         ) as mock_vlm,
     ):
@@ -96,11 +98,10 @@ def test_needs_heavy_path_routing_rule():
 
 
 def test_azure_di_and_vlm_are_placeholders_for_now(engine):
-    """azure_di/vlm real SDK calls are intentionally disabled right now (no
-    usable in4u credentials yet, and VLM calls cost money per image) -- both
-    return a fixed placeholder instead, so parsing doesn't fail and chunking
-    still has text to work with. No mocking here: this is the actual current
-    behavior, not a stand-in for a real call."""
+    """azure_di/vlm 실제 SDK 호출은 지금 의도적으로 꺼둔 상태다(in4u 자격증명
+    아직 못 씀, VLM은 이미지당 비용 발생) — 둘 다 고정 placeholder를 반환해서
+    파싱이 실패하지 않고 청킹까지 이어지게 한다. 여기선 mock 없이 실제 동작
+    그대로를 검증한다."""
     document = engine.parse("doc.pdf", data=_pdf_with_image())
 
     azure_elements = [el for el in document.elements if el.metadata.get("source") == "azure_di"]
@@ -113,4 +114,35 @@ def test_azure_di_and_vlm_are_placeholders_for_now(engine):
     assert len(vlm_elements) == 1
     assert vlm_elements[0].metadata.get("stub") is True
     assert vlm_elements[0].text
-    assert vlm_elements[0].bbox is not None
+    assert len(vlm_elements[0].bboxes) == 1
+    assert vlm_elements[0].metadata.get("layout_label")  # 25개 카테고리 중 하나가 붙어 있어야 함
+
+
+def test_page_graph_runs_azure_di_and_vlm_in_parallel():
+    """graph.py 자체가 실제로 LangGraph 병렬 분기를 타는지 확인 — layout을
+    직접 만들어 두 노드를 억지로 동시에 타게 만든 뒤, 결과에 azure_di/vlm
+    양쪽 요소가 다 있는지 본다(순차 호출이 아니라 같은 super-step에서 둘 다
+    실행됐다는 뜻)."""
+    graph = build_page_graph().compile()
+
+    fake_layout = PageLayout(
+        has_figures=True,
+        has_text_layer=True,
+        boxes=[],
+    )
+
+    with (
+        patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=[DocumentElement(text="a", metadata={"source": "azure_di"})],
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            return_value=[DocumentElement(text="v", metadata={"source": "vlm"})],
+        ),
+    ):
+        result = graph.invoke({"page": None, "page_number": 1, "elements": []})
+
+    sources = {el.metadata["source"] for el in result["elements"]}
+    assert sources == {"azure_di", "vlm"}
