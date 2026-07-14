@@ -13,6 +13,7 @@ from document_parser.core.exceptions import (
     UnsupportedFormatError,
 )
 from document_parser.core.models import (
+    BBox,
     Chunk,
     ChunkingConfig,
     DocumentElement,
@@ -26,6 +27,7 @@ from document_parser.pipeline import IngestPipeline
 __version__ = "0.1.0"
 
 __all__ = [
+    "BBox",
     "Chunk",
     "ChunkingConfig",
     "ChunkingEngine",

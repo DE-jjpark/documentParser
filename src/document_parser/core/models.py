@@ -18,12 +18,22 @@ class ElementType(StrEnum):
     IMAGE = "image"
 
 
+class BBox(BaseModel):
+    """Axis-aligned bounding box in the source page's native coordinate space."""
+
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
 class DocumentElement(BaseModel):
     """A single structural unit extracted from a source document."""
 
     type: ElementType = ElementType.TEXT
     text: str
     page: int | None = None
+    bbox: BBox | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

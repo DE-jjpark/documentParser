@@ -16,7 +16,7 @@ src/document_parser/
 ├── py.typed             # 타입힌트 배포 마커
 │
 ├── core/                # 공유 계약 레이어 (두 엔진이 의존하는 유일한 모듈)
-│   ├── models.py        #   ParsedDocument, DocumentElement, Segment,
+│   ├── models.py        #   ParsedDocument, DocumentElement(+BBox), Segment,
 │   │                    #   Chunk, ChunkingConfig (모두 Pydantic)
 │   └── exceptions.py    #   DocumentParserError 및 하위 예외 타입
 │
@@ -25,7 +25,15 @@ src/document_parser/
 │   ├── graph.py         #   LangGraph 그래프 조립 (내부 구현)
 │   ├── state.py         #   ParsingState (내부 구현)
 │   ├── nodes/           #   detect_format -> extract -> assemble
+│   ├── weights.py       #   PP-DocLayoutV2 가중치 다운로드 ('layout' extra)
 │   └── loaders/         #   포맷별 로더 (txt/md 내장, pdf는 extra)
+│       └── pdf/         #     레이아웃 분석 후 페이지별 분기(로더 내부 구현,
+│                         #     LangGraph 아님 — 평범한 파이썬 함수 호출):
+│                         #     layout.py  분석+라우팅 규칙(현재 pymupdf 휴리스틱
+│                         #                stub, 추후 PP-DocLayoutV2로 교체 예정)
+│                         #     native.py  텍스트 레이어 있는 페이지 (실제 구현)
+│                         #     azure_di.py / vlm.py  그림 포함·스캔 페이지
+│                         #                (stub, TODO 참고)
 │
 ├── chunking/            # 청킹 엔진: Segment -> Chunk (parsing과 독립)
 │   ├── engine.py        #   ChunkingEngine 파사드 (chunk / achunk)
