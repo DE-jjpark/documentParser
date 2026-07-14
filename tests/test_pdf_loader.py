@@ -9,6 +9,7 @@ layout.analyze_page()는 실제로(설치된 것 기준: 'layout' extra + 가중
 호출하는 지점에서 mock한다 — 실제 Azure 자격증명이 이 환경에 없어서다.
 """
 
+import os
 from unittest.mock import patch
 
 import pytest
@@ -32,6 +33,14 @@ except ImportError:
 requires_real_layout_model = pytest.mark.skipif(
     not _HAS_REAL_LAYOUT_MODEL,
     reason="'layout' extra + 가중치 필요 (25개 카테고리는 실제 PP-DocLayoutV2가 있어야 나옴)",
+)
+
+requires_real_azure_di = pytest.mark.skipif(
+    not (
+        os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
+        and os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY")
+    ),
+    reason="AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT / _KEY 환경변수 필요 (실제 in4u 리소스 호출)",
 )
 
 
@@ -111,19 +120,21 @@ def test_needs_heavy_path_routing_rule():
     assert needs_heavy_path(PageLayout(has_figures=False, has_text_layer=True)) is False
 
 
-def test_azure_di_and_vlm_are_placeholders_for_now(engine):
-    """azure_di/vlm 실제 SDK 호출은 지금 의도적으로 꺼둔 상태다(in4u 자격증명
-    아직 못 씀, VLM은 이미지당 비용 발생) — 둘 다 고정 placeholder를 반환해서
-    파싱이 실패하지 않고 청킹까지 이어지게 한다. 여기선 mock 없이 실제 동작
-    그대로를 검증한다."""
-    document = engine.parse("doc.pdf", data=_pdf_with_image())
+def test_azure_di_is_real_vlm_is_still_placeholder(engine):
+    """AzureDI는 in4u 리소스(rnd-skep-commpf-di)로 실제 연동됐다(자격증명 없는
+    이 테스트 환경에서는 client 자체를 mock). VLM은 아직 Foundry 모델 카탈로그
+    연동 전이라 여전히 고정 placeholder를 반환한다 — mock 없이 실제 동작
+    그대로 검증한다."""
+    fake_azure_element = DocumentElement(
+        type=ElementType.TEXT, text="from azure", page=1, metadata={"source": "azure_di"}
+    )
+    with patch(
+        "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+        return_value=[fake_azure_element],
+    ):
+        document = engine.parse("doc.pdf", data=_pdf_with_image())
 
-    azure_elements = [el for el in document.elements if el.metadata.get("source") == "azure_di"]
     vlm_elements = [el for el in document.elements if el.metadata.get("source") == "vlm"]
-
-    assert len(azure_elements) == 1
-    assert azure_elements[0].metadata.get("stub") is True
-    assert azure_elements[0].text
 
     assert len(vlm_elements) == 1
     assert vlm_elements[0].metadata.get("stub") is True
@@ -246,8 +257,16 @@ def test_mixed_content_classified_with_real_layout_labels(engine):
 def test_scanned_page_without_text_layer_routes_to_heavy_path(engine):
     """텍스트 레이어가 없는 페이지(스캔본 흉내)도 에러 없이 AzureDI+VLM
     경로를 타는지 확인 — 25개 카테고리 모델 없이도(pymupdf 휴리스틱만으로도)
-    성립해야 한다."""
-    document = engine.parse("scanned.pdf", data=_scanned_no_text_layer_pdf())
+    성립해야 한다. AzureDI는 실제 호출로 바뀌어서(자격증명 필요) 여기선
+    routing/병합 로직만 보는 게 목적이라 mock한다."""
+    fake_azure_element = DocumentElement(
+        type=ElementType.TEXT, text="from azure", page=1, metadata={"source": "azure_di"}
+    )
+    with patch(
+        "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+        return_value=[fake_azure_element],
+    ):
+        document = engine.parse("scanned.pdf", data=_scanned_no_text_layer_pdf())
 
     assert len(document.elements) >= 1
     assert all(el.metadata.get("source") in {"azure_di", "vlm"} for el in document.elements)
@@ -256,11 +275,35 @@ def test_scanned_page_without_text_layer_routes_to_heavy_path(engine):
 @requires_real_layout_model
 def test_multiple_figures_merge_in_reading_order_not_insertion_order(engine):
     """그림이 여러 개일 때, PDF에 삽입된 순서가 아니라 실제 페이지상 위치
-    (위→아래) 기준으로 병합되는지 확인한다."""
-    document = engine.parse("multi_fig.pdf", data=_multi_figure_pdf())
+    (위→아래) 기준으로 병합되는지 확인한다. AzureDI는 mock(자격증명 없이도
+    돌아가게, 이 테스트의 관심사는 vlm 쪽 병합 순서라서)."""
+    fake_azure_element = DocumentElement(
+        type=ElementType.TEXT, text="from azure", page=1, metadata={"source": "azure_di"}
+    )
+    with patch(
+        "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+        return_value=[fake_azure_element],
+    ):
+        document = engine.parse("multi_fig.pdf", data=_multi_figure_pdf())
 
     vlm_elements = [el for el in document.elements if el.metadata.get("source") == "vlm"]
     assert len(vlm_elements) == 2
 
     y_positions = [el.bboxes[0].y0 for el in vlm_elements]
     assert y_positions == sorted(y_positions)  # 위쪽 그림이 먼저 나와야 함(삽입은 반대 순서였음)
+
+
+@requires_real_azure_di
+def test_azure_di_real_call(engine):
+    """AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT/_KEY가 실제로 설정돼 있을 때만
+    도는 라이브 검증 — in4u Document Intelligence 리소스(rnd-skep-commpf-di)에
+    진짜 호출을 보내 텍스트/bbox가 정상적으로 돌아오는지 확인한다. 자격증명이
+    없는 환경(CI 등)에서는 그냥 skip된다."""
+    # _pdf_with_image()를 써야 한다 — 그림이 있어야 heavy path(AzureDI+VLM)를
+    # 타고, 텍스트만 있는 페이지는 native 경로로 빠져 AzureDI를 아예 안 부른다.
+    document = engine.parse("doc.pdf", data=_pdf_with_image())
+
+    azure_elements = [el for el in document.elements if el.metadata.get("source") == "azure_di"]
+    assert len(azure_elements) >= 1
+    assert azure_elements[0].text  # "a caption above a figure"에 해당하는 실제 인식 결과
+    assert len(azure_elements[0].bboxes) >= 1

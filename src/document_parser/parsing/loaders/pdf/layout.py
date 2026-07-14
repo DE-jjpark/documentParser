@@ -21,6 +21,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from document_parser.core.exceptions import MissingDependencyError
+from document_parser.parsing.loaders.pdf.coords import RENDER_DPI, px_to_pt
 from document_parser.parsing.weights import layout_model_dir
 
 if TYPE_CHECKING:
@@ -135,19 +136,6 @@ def _get_model():
     return LayoutDetection(model_name="PP-DocLayoutV2", model_dir=str(model_dir))
 
 
-_RENDER_DPI = 200
-# PP-DocLayoutV2는 렌더링한 이미지의 픽셀 좌표(200dpi 기준)로 좌표를 주는데,
-# pymupdf(page.get_text(clip=...) 등)는 포인트(72dpi) 좌표를 쓴다. 이 변환을
-# 빠뜨리면 좌표가 실제 위치보다 200/72≈2.78배 어긋난 엉뚱한 영역을 가리키게
-# 된다(실제로 이 버그로 텍스트 전용 페이지에서 클립 영역이 빗나가 요소가
-# 0개 나온 적이 있어 여기서 바로잡는다).
-_PX_TO_PT = 72 / _RENDER_DPI
-
-
-def _px_to_pt(coordinate: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-    return tuple(v * _PX_TO_PT for v in coordinate)
-
-
 def analyze_page(page: pymupdf.Page) -> PageLayout:
     has_text_layer = bool(page.get_text().strip())
 
@@ -156,7 +144,7 @@ def analyze_page(page: pymupdf.Page) -> PageLayout:
     except ImportError:
         return _analyze_page_heuristic(page, has_text_layer)
 
-    pix = page.get_pixmap(dpi=_RENDER_DPI)
+    pix = page.get_pixmap(dpi=RENDER_DPI)
     with tempfile.NamedTemporaryFile(suffix=".png") as f:
         pix.save(f.name)
         (result,) = model.predict(f.name, batch_size=1, layout_nms=True)
@@ -165,7 +153,7 @@ def analyze_page(page: pymupdf.Page) -> PageLayout:
         [
             LayoutBox(
                 label=box["label"],
-                bbox=_px_to_pt(tuple(box["coordinate"])),
+                bbox=px_to_pt(tuple(box["coordinate"])),
                 order=box.get("order"),
             )
             for box in result["boxes"]
