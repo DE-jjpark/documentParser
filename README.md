@@ -118,7 +118,32 @@ uv run uvicorn document_parser.api.main:app --reload
 ```bash
 uv run document-parser parse <file>                      # ParsedDocument JSON 출력
 uv run document-parser ingest <file> --chunk-size 500    # Chunk 목록 JSON 출력
+uv run document-parser download-models                   # 모델 웨이트 다운로드
 ```
+
+### 모델 웨이트
+
+레이아웃 분석용 [PP-DocLayoutV2](https://huggingface.co/PaddlePaddle/PP-DocLayoutV2)
+웨이트(약 204MB)는 패키지에 포함되지 않으며, `layout` extra 설치 후
+`download-models`로 받습니다.
+
+```bash
+pip install "document-parser[layout] @ ..."
+document-parser download-models                          # 기본 캐시 경로에 다운로드
+document-parser download-models --dest /opt/models      # 경로 지정
+```
+
+- **미리 받아두세요.** 용량이 커서 첫 요청 시점에 받게 두면 안 됩니다. 배포
+  스크립트나 Docker 이미지 빌드 단계에서 실행해 레이어로 캐시하는 것을
+  권장합니다.
+- **리비전 핀**: 재현성을 위해 HuggingFace 리비전이 코드에 핀되어 있습니다
+  (`document_parser/parsing/weights.py`의 `DEFAULT_REVISION`). 다른 버전이
+  필요하면 `--revision`으로 오버라이드하고, 업그레이드 시 핀을 갱신하세요.
+- **다운로드 경로 우선순위**: `--dest` > `$DOCUMENT_PARSER_MODEL_DIR` >
+  `~/.cache/document-parser/models/PP-DocLayoutV2`. 다운로드는 멱등이라 이미
+  받은 파일은 재사용됩니다.
+- **속도 제한**: 미인증 다운로드 경고가 뜨거나 속도 제한에 걸리면 `HF_TOKEN`
+  환경변수에 HuggingFace 토큰을 설정하세요.
 
 ## 개발
 

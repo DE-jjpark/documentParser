@@ -11,6 +11,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pdf = ["pymupdf>=1.24"]
+layout = ["huggingface_hub>=0.26"]
 api = [
     "fastapi>=0.115",
     "uvicorn>=0.30",

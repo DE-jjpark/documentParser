@@ -5,6 +5,7 @@ import json
 import sys
 
 from document_parser import ChunkingConfig, DocumentParserError, IngestPipeline, __version__
+from document_parser.parsing.weights import LAYOUT_MODEL_REPO, download_layout_model
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +33,21 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_cmd.add_argument("--chunk-size", type=int, default=1000)
     ingest_cmd.add_argument("--chunk-overlap", type=int, default=200)
 
+    download_cmd = subparsers.add_parser(
+        "download-models",
+        help="download model weights for the parsing engine (requires the 'layout' extra)",
+    )
+    download_cmd.add_argument(
+        "--dest",
+        help="target directory (default: $DOCUMENT_PARSER_MODEL_DIR "
+        "or ~/.cache/document-parser/models)",
+    )
+    download_cmd.add_argument(
+        "--revision",
+        default=None,
+        help="HuggingFace revision to download (default: pinned known-good revision)",
+    )
+
     return parser
 
 
@@ -43,10 +59,9 @@ def main() -> None:
         parser.print_help()
         return
 
-    pipeline = IngestPipeline()
     try:
         if args.command == "parse":
-            document = pipeline.parsing.parse(args.file, format=args.format)
+            document = IngestPipeline().parsing.parse(args.file, format=args.format)
             print(document.model_dump_json(indent=2))
         elif args.command == "ingest":
             config = ChunkingConfig(
@@ -54,8 +69,12 @@ def main() -> None:
                 chunk_size=args.chunk_size,
                 chunk_overlap=args.chunk_overlap,
             )
-            chunks = pipeline.ingest(args.file, format=args.format, config=config)
+            chunks = IngestPipeline().ingest(args.file, format=args.format, config=config)
             print(json.dumps([chunk.model_dump() for chunk in chunks], indent=2))
+        elif args.command == "download-models":
+            kwargs = {"revision": args.revision} if args.revision else {}
+            path = download_layout_model(dest=args.dest, **kwargs)
+            print(f"downloaded {LAYOUT_MODEL_REPO} to {path}")
     except DocumentParserError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
