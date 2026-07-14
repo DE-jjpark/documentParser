@@ -23,6 +23,15 @@ def default_model_dir() -> Path:
     return base / "document-parser" / "models"
 
 
+def layout_model_dir(dest: str | Path | None = None) -> Path:
+    """Resolve where PP-DocLayoutV2 weights live (downloaded or not).
+
+    Shared by download_layout_model() (writes here) and
+    parsing.loaders.pdf.layout (reads from here), so the two can't drift.
+    """
+    return Path(dest) if dest else default_model_dir() / LAYOUT_MODEL_REPO.rsplit("/", 1)[-1]
+
+
 def download_layout_model(
     dest: str | Path | None = None,
     revision: str = DEFAULT_REVISION,
@@ -39,7 +48,7 @@ def download_layout_model(
             "model download requires the 'layout' extra: pip install 'document-parser[layout]'"
         ) from exc
 
-    target = Path(dest) if dest else default_model_dir() / LAYOUT_MODEL_REPO.rsplit("/", 1)[-1]
+    target = layout_model_dir(dest)
     target.mkdir(parents=True, exist_ok=True)
     snapshot_download(repo_id=LAYOUT_MODEL_REPO, revision=revision, local_dir=str(target))
     return target

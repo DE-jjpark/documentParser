@@ -1,13 +1,22 @@
-"""Tests for the pdf loader's per-page routing (native vs AzureDI+VLM stub path).
+"""Tests for the pdf loader's per-page routing (native vs AzureDI+VLM path).
 
 Builds tiny synthetic PDFs with pymupdf itself rather than shipping fixture
 files, mirroring the "hello world" style already used for text loader tests.
+
+layout.analyze_page() itself is exercised for real (against whatever's
+installed: real PP-DocLayoutV2 if the 'layout' extra + weights are present,
+otherwise the pymupdf heuristic fallback -- both correctly classify these
+synthetic pages). azure_di/vlm are mocked at the pdf-loader-import boundary
+since they need real Azure credentials this environment doesn't have.
 """
+
+from unittest.mock import patch
 
 import pymupdf
 import pytest
 
 from document_parser import ElementType, ParsingEngine
+from document_parser.core.models import BBox, DocumentElement
 from document_parser.parsing.loaders.pdf.layout import PageLayout, needs_heavy_path
 
 
@@ -50,15 +59,33 @@ def test_text_only_page_takes_native_route(engine):
 
 
 def test_page_with_figure_takes_azure_di_and_vlm_route(engine):
-    document = engine.parse("doc.pdf", data=_pdf_with_image())
+    fake_azure_element = DocumentElement(
+        type=ElementType.TEXT, text="from azure", page=1, metadata={"source": "azure_di"}
+    )
+    fake_vlm_element = DocumentElement(
+        type=ElementType.IMAGE,
+        text="from vlm",
+        page=1,
+        bbox=BBox(x0=0, y0=0, x1=1, y1=1),
+        metadata={"source": "vlm"},
+    )
 
+    with (
+        patch(
+            "document_parser.parsing.loaders.pdf.extract_with_azure_di",
+            return_value=[fake_azure_element],
+        ) as mock_azure,
+        patch(
+            "document_parser.parsing.loaders.pdf.caption_figures",
+            return_value=[fake_vlm_element],
+        ) as mock_vlm,
+    ):
+        document = engine.parse("doc.pdf", data=_pdf_with_image())
+
+    mock_azure.assert_called_once()
+    mock_vlm.assert_called_once()
     sources = {el.metadata.get("source") for el in document.elements}
     assert sources == {"azure_di", "vlm"}
-
-    vlm_elements = [el for el in document.elements if el.metadata.get("source") == "vlm"]
-    assert len(vlm_elements) == 1
-    assert vlm_elements[0].type == ElementType.IMAGE
-    assert vlm_elements[0].bbox is not None
 
 
 def test_needs_heavy_path_routing_rule():
