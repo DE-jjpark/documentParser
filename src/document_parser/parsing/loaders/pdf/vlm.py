@@ -3,18 +3,20 @@
 다이어그램 메모: AzureDI와 달리 먼저 크롭한 다음 VLM에 보낸다 — 페이지
 전체보다 타이트하게 자른 영역이 정확도가 더 좋다.
 
-지금은 고정 placeholder로 단락(short-circuit)시켜뒀다: VLM 호출은 이미지
-1장당 비용이 발생해서, 자격증명 유무와 무관하게 이 경로가 실제로 필요해지기
-전까지는 예산을 쓰지 않으려고 꺼둔 상태다. 실제 클라이언트(parsing.clients.vlm,
-커밋 ec8c30d)는 그대로 남겨뒀다 — 준비되면 아래 placeholder를 `VLMClient`
-호출로 바꾸면 된다.
+실제 in4u Databricks AI Gateway(Claude Sonnet 4.6)로 연동 확인함 —
+parsing.clients.vlm.VLMClient 참고. 크롭은 pymupdf의 get_pixmap(clip=...)로
+하는데, clip은 포인트 좌표를 받으므로(픽셀 변환 불필요) box.bbox를 그대로
+쓴다 — layout.py/azure_di.py에서 모델이 "돌려주는" 좌표를 변환해야 했던 것과는
+반대 방향이라 혼동하지 말 것.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from document_parser.core.models import BBox, DocumentElement, ElementType
+from document_parser.parsing.clients.vlm import VLMClient
 
 if TYPE_CHECKING:
     # 타입 힌트 전용 — layout.py 주석 참고.
@@ -22,7 +24,15 @@ if TYPE_CHECKING:
 
     from document_parser.parsing.loaders.pdf.layout import LayoutBox
 
-_PLACEHOLDER_CAPTION = "[image - VLM not connected, placeholder]"
+_PROMPT = (
+    "Describe the content of this figure concisely. If it's a chart, table-like "
+    "image, or diagram, describe its structure and key values."
+)
+
+
+@lru_cache(maxsize=1)
+def _get_client() -> VLMClient:
+    return VLMClient()
 
 
 def caption_figures(
@@ -30,16 +40,25 @@ def caption_figures(
     page_number: int,
     boxes: list[LayoutBox],
 ) -> list[DocumentElement]:
-    return [
-        DocumentElement(
-            type=ElementType.IMAGE,
-            text=_PLACEHOLDER_CAPTION,
-            page=page_number,
-            bboxes=[BBox(x0=box.bbox[0], y0=box.bbox[1], x1=box.bbox[2], y1=box.bbox[3])],
-            # layout_label: PP-DocLayoutV2의 25개 카테고리 중 실제 감지된 라벨
-            # (예: "chart", "image", "seal" 등) — 그림이라는 것만 아는 게
-            # 아니라 어떤 종류의 그림인지까지 남겨둔다.
-            metadata={"source": "vlm", "stub": True, "layout_label": box.label},
+    if not boxes:
+        return []
+
+    client = _get_client()
+    elements: list[DocumentElement] = []
+    for box in boxes:
+        pix = page.get_pixmap(clip=box.bbox, dpi=200)
+        caption = client.caption_image(pix.tobytes("png"), _PROMPT)
+        x0, y0, x1, y1 = box.bbox
+        elements.append(
+            DocumentElement(
+                type=ElementType.IMAGE,
+                text=caption,
+                page=page_number,
+                bboxes=[BBox(x0=x0, y0=y0, x1=x1, y1=y1)],
+                # layout_label: PP-DocLayoutV2의 25개 카테고리 중 실제 감지된 라벨
+                # (예: "chart", "image", "seal" 등) — 그림이라는 것만 아는 게
+                # 아니라 어떤 종류의 그림인지까지 남겨둔다.
+                metadata={"source": "vlm", "layout_label": box.label},
+            )
         )
-        for box in boxes
-    ]
+    return elements

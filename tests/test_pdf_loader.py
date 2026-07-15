@@ -43,6 +43,11 @@ requires_real_azure_di = pytest.mark.skipif(
     reason="AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT / _KEY 환경변수 필요 (실제 in4u 리소스 호출)",
 )
 
+requires_real_vlm = pytest.mark.skipif(
+    not (os.environ.get("DATABRICKS_HOST") and os.environ.get("DATABRICKS_TOKEN")),
+    reason="DATABRICKS_HOST / DATABRICKS_TOKEN 환경변수 필요 (실제 in4u AI Gateway 호출)",
+)
+
 
 def _text_only_pdf() -> bytes:
     doc = pymupdf.open()
@@ -120,24 +125,43 @@ def test_needs_heavy_path_routing_rule():
     assert needs_heavy_path(PageLayout(has_figures=False, has_text_layer=True)) is False
 
 
-def test_azure_di_is_real_vlm_is_still_placeholder(engine):
-    """AzureDI는 in4u 리소스(rnd-skep-commpf-di)로 실제 연동됐다(자격증명 없는
-    이 테스트 환경에서는 client 자체를 mock). VLM은 아직 Foundry 모델 카탈로그
-    연동 전이라 여전히 고정 placeholder를 반환한다 — mock 없이 실제 동작
-    그대로 검증한다."""
+def test_azure_di_and_vlm_both_mocked_but_wired_correctly(engine):
+    """AzureDI(in4u rnd-skep-commpf-di)와 VLM(in4u Databricks AI Gateway,
+    Claude Sonnet 4.6)은 둘 다 이제 실제 연동이다 — 이 테스트는 자격증명 없이도
+    돌게 둘 다 mock해서, caption_figures가 실제로 감지된 라벨(layout_label)을
+    DocumentElement에 반영하는 배선 자체만 확인한다. 실제 라이브 호출 검증은
+    test_azure_di_real_call/test_vlm_real_call에서 한다."""
     fake_azure_element = DocumentElement(
         type=ElementType.TEXT, text="from azure", page=1, metadata={"source": "azure_di"}
     )
-    with patch(
-        "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-        return_value=[fake_azure_element],
+
+    def fake_caption_figures(page, page_number, boxes):
+        return [
+            DocumentElement(
+                type=ElementType.IMAGE,
+                text="a caption",
+                page=page_number,
+                bboxes=[BBox(x0=b.bbox[0], y0=b.bbox[1], x1=b.bbox[2], y1=b.bbox[3])],
+                metadata={"source": "vlm", "layout_label": b.label},
+            )
+            for b in boxes
+        ]
+
+    with (
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=[fake_azure_element],
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            side_effect=fake_caption_figures,
+        ),
     ):
         document = engine.parse("doc.pdf", data=_pdf_with_image())
 
     vlm_elements = [el for el in document.elements if el.metadata.get("source") == "vlm"]
 
     assert len(vlm_elements) == 1
-    assert vlm_elements[0].metadata.get("stub") is True
     assert vlm_elements[0].text
     assert len(vlm_elements[0].bboxes) == 1
     assert vlm_elements[0].metadata.get("layout_label")  # 25개 카테고리 중 하나가 붙어 있어야 함
@@ -275,14 +299,34 @@ def test_scanned_page_without_text_layer_routes_to_heavy_path(engine):
 @requires_real_layout_model
 def test_multiple_figures_merge_in_reading_order_not_insertion_order(engine):
     """그림이 여러 개일 때, PDF에 삽입된 순서가 아니라 실제 페이지상 위치
-    (위→아래) 기준으로 병합되는지 확인한다. AzureDI는 mock(자격증명 없이도
-    돌아가게, 이 테스트의 관심사는 vlm 쪽 병합 순서라서)."""
+    (위→아래) 기준으로 병합되는지 확인한다. AzureDI/VLM 둘 다 mock(자격증명
+    없이도 돌아가게 — 이 테스트의 관심사는 병합 순서 로직이라서, VLM의 실제
+    캡션 품질과는 무관함)."""
     fake_azure_element = DocumentElement(
         type=ElementType.TEXT, text="from azure", page=1, metadata={"source": "azure_di"}
     )
-    with patch(
-        "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-        return_value=[fake_azure_element],
+
+    def fake_caption_figures(page, page_number, boxes):
+        return [
+            DocumentElement(
+                type=ElementType.IMAGE,
+                text="a caption",
+                page=page_number,
+                bboxes=[BBox(x0=b.bbox[0], y0=b.bbox[1], x1=b.bbox[2], y1=b.bbox[3])],
+                metadata={"source": "vlm", "layout_label": b.label},
+            )
+            for b in boxes
+        ]
+
+    with (
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=[fake_azure_element],
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            side_effect=fake_caption_figures,
+        ),
     ):
         document = engine.parse("multi_fig.pdf", data=_multi_figure_pdf())
 
@@ -298,12 +342,38 @@ def test_azure_di_real_call(engine):
     """AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT/_KEY가 실제로 설정돼 있을 때만
     도는 라이브 검증 — in4u Document Intelligence 리소스(rnd-skep-commpf-di)에
     진짜 호출을 보내 텍스트/bbox가 정상적으로 돌아오는지 확인한다. 자격증명이
-    없는 환경(CI 등)에서는 그냥 skip된다."""
+    없는 환경(CI 등)에서는 그냥 skip된다. VLM은 mock — Databricks 자격증명
+    유무와 무관하게 AzureDI만 독립적으로 검증하기 위함."""
     # _pdf_with_image()를 써야 한다 — 그림이 있어야 heavy path(AzureDI+VLM)를
     # 타고, 텍스트만 있는 페이지는 native 경로로 빠져 AzureDI를 아예 안 부른다.
-    document = engine.parse("doc.pdf", data=_pdf_with_image())
+    with patch(
+        "document_parser.parsing.loaders.pdf.graph.caption_figures",
+        return_value=[],
+    ):
+        document = engine.parse("doc.pdf", data=_pdf_with_image())
 
     azure_elements = [el for el in document.elements if el.metadata.get("source") == "azure_di"]
     assert len(azure_elements) >= 1
     assert azure_elements[0].text  # "a caption above a figure"에 해당하는 실제 인식 결과
     assert len(azure_elements[0].bboxes) >= 1
+
+
+@requires_real_vlm
+def test_vlm_real_call(engine):
+    """DATABRICKS_HOST/DATABRICKS_TOKEN이 실제로 설정돼 있을 때만 도는 라이브
+    검증 — in4u Databricks AI Gateway(Claude Sonnet 4.6)에 진짜 크롭 이미지를
+    보내 캡션이 정상적으로 돌아오는지 확인한다. AzureDI는 mock — Azure
+    자격증명 유무와 무관하게 VLM만 독립적으로 검증하기 위함."""
+    fake_azure_element = DocumentElement(
+        type=ElementType.TEXT, text="from azure", page=1, metadata={"source": "azure_di"}
+    )
+    with patch(
+        "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+        return_value=[fake_azure_element],
+    ):
+        document = engine.parse("doc.pdf", data=_pdf_with_image())
+
+    vlm_elements = [el for el in document.elements if el.metadata.get("source") == "vlm"]
+    assert len(vlm_elements) >= 1
+    assert vlm_elements[0].text  # 실제 Claude Sonnet 4.6이 생성한 캡션
+    assert len(vlm_elements[0].bboxes) >= 1
