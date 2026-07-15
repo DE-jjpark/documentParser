@@ -31,6 +31,23 @@ from document_parser.core.exceptions import MissingDependencyError
 DEFAULT_MODEL = "skep_parser.skep-parser-test.parser-test-sn-4-6"
 _AI_GATEWAY_PATH = "ai-gateway/mlflow/v1"
 
+# 참고: koreacentral 워크스페이스에서 Foundation Model API(pay-per-token)로
+# 네이티브 서빙 가능하다고 확인된 모델 후보군(2026-07-15 기준, 팀 확인).
+# Gemini는 이 목록에 없어서(리전 미지원) Claude Sonnet 4.6으로 갔다 — 나중에
+# 모델을 바꿀 일이 있으면 이 중에서 고르면 리전 문제로 또 막힐 가능성이
+# 낮다. 단, 비전(이미지 입력) 지원 여부는 모델마다 별도 확인 필요 — 아래
+# 목록은 "이 워크스페이스에서 서빙 가능하다"까지만 확인된 것이지 VLM 용도로
+# 다 검증된 건 아니다.
+#   Anthropic : Claude Sonnet 4.6/4.5/4, Claude Haiku 4.5,
+#               Claude Opus 4.8/4.7/4.6/4.5/4.1, Claude Fable 5
+#   Meta      : Llama 4 Maverick, Llama 3.3 70B Instruct,
+#               Llama 3.1 405B Instruct, Llama 3.1 8B Instruct
+#   Alibaba   : Qwen3.5 122B A10B, Qwen3-Next 80B A3B Instruct,
+#               Qwen3-Embedding-0.6B(임베딩)
+#   OpenAI    : GPT-OSS-120B, GPT-OSS-20B (오픈웨이트만)
+#   Google    : Gemma 3 12B (오픈웨이트)
+#   임베딩     : GTE Large (En)
+
 
 class VLMClient:
     def __init__(self, model: str | None = None) -> None:
