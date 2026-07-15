@@ -183,7 +183,23 @@ def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLay
     )
 
 
-def needs_heavy_path(layout: PageLayout) -> bool:
-    """다이어그램의 분기 규칙: 그림이 있거나 텍스트 레이어가 없으면(스캔 문서)
-    AzureDI+VLM, 텍스트만 있고 텍스트 레이어가 있으면 네이티브 추출."""
-    return layout.has_figures or not layout.has_text_layer
+def route_page(layout: PageLayout) -> str:
+    """페이지 라우팅 규칙 (리뷰 피드백으로 수정 — 원래는 "그림 있음 OR
+    텍스트 레이어 없음"이면 페이지 전체를 AzureDI로 보냈는데, 그러면 텍스트
+    레이어가 멀쩡히 있어도 그림 하나 때문에 DI가 페이지 전체 텍스트를 다시
+    추출하게 돼서 native가 이미 더 정확히 할 수 있는 일을 중복으로 하고
+    있었다):
+
+    - 텍스트 레이어가 없음(스캔 문서) → 원본 텍스트를 읽을 방법이 없으니
+      AzureDI(페이지 전체) + VLM(그림 있으면 캡션)
+    - 텍스트 레이어는 있는데 그림도 있음 → 텍스트는 native로 정확하게 뽑고
+      그림만 VLM으로 캡션 (AzureDI 불필요)
+    - 텍스트만 있고 텍스트 레이어도 있음 → native만
+
+    반환값: "native" | "native_and_vlm" | "azure_di_and_vlm"
+    """
+    if not layout.has_text_layer:
+        return "azure_di_and_vlm"
+    if layout.has_figures:
+        return "native_and_vlm"
+    return "native"
