@@ -31,7 +31,7 @@ azure = [
     "azure-ai-documentintelligence>=1.0.0",
 ]
 vlm = [
-    "google-genai>=0.3",
+    "openai>=1.0",
 ]
 
 [project.scripts]
