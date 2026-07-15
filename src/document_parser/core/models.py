@@ -42,6 +42,9 @@ class DocumentElement(BaseModel):
     page: int | None = None
     bboxes: list[BBox] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # "e{n}" (1부터) — assemble 노드가 elements 순서(=읽기 순서) 그대로 문서
+    # 전체에 매기는 전역 일련번호. 페이지/타입 무관.
+    elem_id: str | None = None
 
 
 class ParsedDocument(BaseModel):
