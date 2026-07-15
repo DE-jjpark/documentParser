@@ -62,7 +62,12 @@ def _extract_from_boxes(
                 text=text,
                 page=page_number,
                 bboxes=[BBox(x0=x0, y0=y0, x1=x1, y1=y1)],
-                metadata={"source": "native", "layout_label": box.label},
+                metadata={
+                    "source": "native",
+                    "layout_label": box.label,
+                    "layout_cls_id": box.cls_id,
+                    "layout_box_index": box.box_index,
+                },
             )
         )
     return elements

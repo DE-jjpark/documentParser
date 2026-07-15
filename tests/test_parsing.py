@@ -31,16 +31,6 @@ def test_parse_markdown_headings(engine):
     assert document.elements[0].metadata["level"] == 1
 
 
-def test_elements_get_sequential_keys_per_page_and_type(engine):
-    """assemble()이 붙이는 key는 "{page}-{type}-{n}" 형태 — 페이지 개념이
-    없는 포맷(md)은 page를 0으로 취급하고, elements 순서(=읽기 순서) 그대로
-    타입별 일련번호를 매긴다."""
-    data = b"# Title\n\nfirst paragraph\n\n## Section\n\nsecond paragraph"
-    document = engine.parse("doc.md", data=data)
-    keys = [el.key for el in document.elements]
-    assert keys == ["0-heading-1", "0-text-1", "0-heading-2", "0-text-2"]
-
-
 def test_parse_bytes_with_explicit_format(engine):
     document = engine.parse("no-extension", data=b"hello", format="txt")
     assert document.format == "txt"

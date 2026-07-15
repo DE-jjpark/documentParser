@@ -278,6 +278,13 @@ def test_mixed_content_classified_with_real_layout_labels(engine):
     y_positions = [el.bboxes[0].y0 for el in document.elements if el.bboxes]
     assert y_positions == sorted(y_positions)
 
+    # cls_id/box_index가 원본 PP-DocLayoutV2 출력과 대조 가능하게 남아있는지
+    cls_ids = [el.metadata.get("layout_cls_id") for el in document.elements]
+    box_indices = [el.metadata.get("layout_box_index") for el in document.elements]
+    assert all(isinstance(v, int) for v in cls_ids)
+    assert all(isinstance(v, int) for v in box_indices)
+    assert len(box_indices) == len(set(box_indices))  # 페이지 안에서 유일
+
 
 def test_scanned_page_without_text_layer_routes_to_azure_di_and_vlm(engine):
     """텍스트 레이어가 없는 페이지(스캔본 흉내)도 에러 없이 AzureDI+VLM

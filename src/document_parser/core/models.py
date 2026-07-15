@@ -42,10 +42,6 @@ class DocumentElement(BaseModel):
     page: int | None = None
     bboxes: list[BBox] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
-    # "{page}-{type}-{n}" (예: "1-table-2" = 1페이지의 2번째 표) — assemble
-    # 노드가 문서 전체를 훑으면서 채운다(포맷 무관, elements 순서 = 읽기 순서
-    # 그대로). 페이지 개념이 없는 포맷(txt/md)은 page를 0으로 취급한다.
-    key: str | None = None
 
 
 class ParsedDocument(BaseModel):
