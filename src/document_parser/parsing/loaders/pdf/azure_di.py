@@ -7,10 +7,17 @@
 클라이언트가 돌려주는 bbox는 200dpi 렌더링 이미지 기준 픽셀 좌표라
 coords.px_to_pt()로 변환해야 pymupdf 좌표계(포인트)와 맞는다 — layout.py의
 PP-DocLayoutV2 좌표와 정확히 같은 이유로 같은 변환을 쓴다.
+
+표 처리: DI가 페이지 전체에서 찾은 표(result.tables, 실제 행/열/병합 구조를
+HTML로 가진 것)를 DetectedTable로 반환한다. PP-DocLayoutV2가 찾은 표 박스와는
+독립적인 검출 결과라 서로 id가 없으므로, graph.py의 merge 노드가 bbox
+겹침으로 어느 PaddleX 박스와 짝인지 판단해서 그 표 요소의 metadata["html"]에
+채워 넣는다.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -25,26 +32,52 @@ if TYPE_CHECKING:
     import pymupdf
 
 
+@dataclass
+class DetectedTable:
+    html: str
+    bboxes: list[BBox] = field(default_factory=list)
+
+
 @lru_cache(maxsize=1)
 def _get_client() -> AzureDocumentIntelligenceClient:
     return AzureDocumentIntelligenceClient()
 
 
-def extract_with_azure_di(page: pymupdf.Page, page_number: int) -> list[DocumentElement]:
+def extract_with_azure_di(
+    page: pymupdf.Page, page_number: int, *, include_text: bool = True
+) -> tuple[list[DocumentElement], list[DetectedTable]]:
+    """페이지 전체를 DI로 분석한다.
+
+    include_text=False면 문단(paragraphs) 기반 TEXT 요소는 안 만든다 — 텍스트
+    레이어가 있어서 native가 이미 텍스트를 뽑고 있는 페이지에서, 표 구조만
+    필요할 때 쓴다(불필요한 TEXT 중복 방지). 표(tables)는 include_text와
+    무관하게 항상 뽑는다.
+    """
     client = _get_client()
     pix = page.get_pixmap(dpi=RENDER_DPI)
     result = client.analyze_layout(pix.tobytes("png"))
 
     elements: list[DocumentElement] = []
-    for paragraph in result.paragraphs:
-        bboxes = [BBox(x0=b[0], y0=b[1], x1=b[2], y1=b[3]) for b in map(px_to_pt, paragraph.bboxes)]
-        elements.append(
-            DocumentElement(
-                type=ElementType.TEXT,
-                text=paragraph.text,
-                page=page_number,
-                bboxes=bboxes,
-                metadata={"source": "azure_di"},
+    if include_text:
+        for paragraph in result.paragraphs:
+            bboxes = [
+                BBox(x0=b[0], y0=b[1], x1=b[2], y1=b[3]) for b in map(px_to_pt, paragraph.bboxes)
+            ]
+            elements.append(
+                DocumentElement(
+                    type=ElementType.TEXT,
+                    text=paragraph.text,
+                    page=page_number,
+                    bboxes=bboxes,
+                    metadata={"source": "azure_di"},
+                )
             )
+
+    tables = [
+        DetectedTable(
+            html=table.html,
+            bboxes=[BBox(x0=b[0], y0=b[1], x1=b[2], y1=b[3]) for b in map(px_to_pt, table.bboxes)],
         )
-    return elements
+        for table in result.tables
+    ]
+    return elements, tables

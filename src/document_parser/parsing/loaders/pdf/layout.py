@@ -62,9 +62,13 @@ ALL_LABELS = (
     "vision_footnote",
 )
 
-# 25개 중 "텍스트로 바로 추출하기 어려운 그림류" — has_figures 판정과 VLM
-# 크롭 대상 결정에 쓴다(skep_parser 프로젝트의 DP-Bench 비교에서 쓴 것과
-# 동일한 분류).
+# 25개 중 "순수 텍스트 추출(pymupdf)만으로는 부족한" 카테고리 — has_figures
+# 판정과 VLM/AzureDI 크롭 대상 결정에 쓴다. 원래는 그림류만 포함했는데(그림은
+# pymupdf로 텍스트를 뽑을 수 없으니 당연), "표는 plumber(pymupdf) 텍스트
+# 추출이 아니라 VLM/DI로 보내기로 했다"는 설계 결정에 따라 table도 여기
+# 포함시켰다 — 표는 pymupdf로 글자는 뽑을 수 있어도 행/열/병합 구조를 못
+# 뽑아서(TEDS/TEDS-S가 그 구조를 보는 지표라 점수가 안 나옴) 그림과 같은
+# 취급으로 바꿨다.
 _FIGURE_LABELS = {
     "chart",
     "image",
@@ -74,6 +78,7 @@ _FIGURE_LABELS = {
     "display_formula",
     "inline_formula",
     "formula_number",
+    "table",
 }
 
 
@@ -108,17 +113,22 @@ class LayoutBox:
 class PageLayout:
     has_figures: bool
     has_text_layer: bool
+    # has_figures와 별도로 두는 이유: AzureDI는 이제 "표 구조만" 뽑는 용도라
+    # (route_page 참고), 표가 없고 이미지·차트만 있는 페이지에서 DI를 태우면
+    # 매칭될 표 자체가 없어 완전히 헛수고(불필요한 네트워크 호출·비용)다.
+    has_table: bool = False
     boxes: list[LayoutBox] = field(default_factory=list)  # 항상 읽기 순서로 정렬돼 있음
 
     @property
     def crop_boxes(self) -> list[LayoutBox]:
-        """그림류(_FIGURE_LABELS)만 골라낸 것 — VLM 크롭 대상. boxes가 이미
-        읽기 순서로 정렬돼 있어 그림이 여러 개여도 순서가 유지된다."""
+        """그림류+표(_FIGURE_LABELS)만 골라낸 것 — VLM/AzureDI 크롭 대상.
+        boxes가 이미 읽기 순서로 정렬돼 있어 여러 개여도 순서가 유지된다."""
         return [b for b in self.boxes if b.label in _FIGURE_LABELS]
 
     @property
     def text_boxes(self) -> list[LayoutBox]:
-        """그림류를 뺀 나머지(제목·본문·표 등) — 네이티브 텍스트 추출 대상."""
+        """순수 텍스트류(제목·본문·목록 등, 표 제외)만 — 네이티브 텍스트
+        추출 대상."""
         return [b for b in self.boxes if b.label not in _FIGURE_LABELS]
 
 
@@ -176,6 +186,7 @@ def analyze_page(page: pymupdf.Page) -> PageLayout:
     return PageLayout(
         has_figures=any(b.label in _FIGURE_LABELS for b in boxes),
         has_text_layer=has_text_layer,
+        has_table=any(b.label == "table" for b in boxes),
         boxes=boxes,
     )
 
@@ -184,8 +195,9 @@ def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLay
     """'layout' extra가 없을 때 폴백: pymupdf 전용 휴리스틱.
 
     실제 25개 카테고리를 감지할 수 없으므로, 찾아낸 래스터 이미지는 그냥
-    "image" 라벨(25개 카탈로그 중 하나)로 표시해둔다. 읽기 순서는 모르므로
-    order=None으로 두고 위치 기준 정렬에 맡긴다."""
+    "image" 라벨(25개 카탈로그 중 하나)로 표시해둔다 — 표는 원천적으로 감지
+    불가(has_table은 항상 False). 읽기 순서는 모르므로 order=None으로 두고
+    위치 기준 정렬에 맡긴다."""
     images = page.get_images(full=True)
     boxes = _sort_boxes(
         [LayoutBox(label="image", bbox=tuple(page.get_image_bbox(img))) for img in images]
@@ -193,27 +205,37 @@ def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLay
     return PageLayout(
         has_figures=bool(boxes),
         has_text_layer=has_text_layer,
+        has_table=False,
         boxes=boxes,
     )
 
 
 def route_page(layout: PageLayout) -> str:
-    """페이지 라우팅 규칙 (리뷰 피드백으로 수정 — 원래는 "그림 있음 OR
-    텍스트 레이어 없음"이면 페이지 전체를 AzureDI로 보냈는데, 그러면 텍스트
-    레이어가 멀쩡히 있어도 그림 하나 때문에 DI가 페이지 전체 텍스트를 다시
-    추출하게 돼서 native가 이미 더 정확히 할 수 있는 일을 중복으로 하고
-    있었다):
+    """페이지 라우팅 규칙 — 4분기.
 
-    - 텍스트 레이어가 없음(스캔 문서) → 원본 텍스트를 읽을 방법이 없으니
-      AzureDI(페이지 전체) + VLM(그림 있으면 캡션)
-    - 텍스트 레이어는 있는데 그림도 있음 → 텍스트는 native로 정확하게 뽑고
-      그림만 VLM으로 캡션 (AzureDI 불필요)
-    - 텍스트만 있고 텍스트 레이어도 있음 → native만
+    - 텍스트 레이어가 있고 그림·표가 없음(순수 텍스트) → native만.
+    - 텍스트 레이어가 있고 표가 있음 → 순수 텍스트는 native가 이미 정확하게
+      뽑으니 그대로 두고, AzureDI는 "표 구조(HTML)만" 뽑는 용도로만 페이지
+      전체를 한 번 더 분석하고(문단 텍스트는 버림 — native와 중복), VLM은
+      그림 캡션 + 표 요약을 담당 — native+azure_di+vlm 셋 다 병렬 실행 후
+      병합(azure_di가 찾은 표와 VLM/PaddleX 표 박스는 bbox 겹침으로 매칭해서
+      하나의 표 요소로 합친다, graph.py의 merge 노드 참고).
+    - 텍스트 레이어가 있고 표는 없지만 다른 그림(이미지·차트 등)은 있음 →
+      AzureDI는 스킵 — DI의 역할이 이제 표 구조 추출뿐이라(has_table 참고),
+      표가 없으면 태워봤자 매칭될 게 없어 완전히 헛수고(불필요한 호출/비용).
+      native(텍스트) + vlm(그림 캡션)만 병렬 실행.
+    - 텍스트 레이어가 없음(스캔) → 원본 텍스트를 읽을 방법이 없으니 AzureDI가
+      페이지 전체(문단 텍스트 + 표 구조 둘 다) 분석 + VLM(그림 캡션/표 요약)
+      병렬 실행 후 병합 — 이 경우는 표 유무와 무관하게 항상 DI가 필요하다
+      (텍스트 자체를 DI로만 얻을 수 있어서).
 
-    반환값: "native" | "native_and_vlm" | "azure_di_and_vlm"
+    반환값: "native" | "native_and_azure_di_and_vlm" | "native_and_vlm" |
+    "azure_di_and_vlm"
     """
     if not layout.has_text_layer:
         return "azure_di_and_vlm"
+    if layout.has_table:
+        return "native_and_azure_di_and_vlm"
     if layout.has_figures:
         return "native_and_vlm"
     return "native"
