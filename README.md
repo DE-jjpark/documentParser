@@ -191,3 +191,6 @@ uv run ruff check      # 린트
 uv run ruff format     # 포맷
 uv run lint-imports    # 아키텍처 경계 검사
 ```
+
+<img width="1796" height="1008" alt="image" src="https://github.com/user-attachments/assets/799acde6-59a7-4b74-8449-cb44c0827186" />
+
