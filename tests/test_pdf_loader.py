@@ -309,6 +309,53 @@ def test_merge_leaves_table_without_matching_di_table_unchanged():
     assert table_elements[0].text == "a table summary"
 
 
+def test_merge_recovers_misclassified_table_using_native_text():
+    """PP-DocLayoutV2가 "table"이라고 했는데 AzureDI가 그 자리에서 실제 표
+    구조를 못 찾았고, 그 영역에 native로 뽑을 수 있는 텍스트가 꽤 있으면
+    (표가 아니라 일반 텍스트를 표로 오분류한 것으로 보고) type을 TABLE에서
+    TEXT로 되돌리고 원문을 text로 써야 한다 — 실측으로 발견한 문제(페이지
+    전체가 표로 오분류돼서 본문이 VLM 요약으로 통째로 대체되며 유실된 것)의
+    회귀 테스트."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    # pymupdf 기본 폰트가 한글 글리프를 지원 안 해서(찍히면 전부 '·'로 나옴)
+    # 영어로 씀 — 여기서 검증하려는 건 어차피 언어가 아니라 "native로 뽑을
+    # 수 있는 텍스트 분량"이라 무관하다.
+    long_text = "This clause is actually plain numbered text, not a table. " * 3
+    page.insert_text((72, 72), long_text, fontsize=10)
+
+    graph = build_page_graph().compile()
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
+    misclassified_element = DocumentElement(
+        type=ElementType.TABLE,
+        text="[VLM이 이 영역을 표로 착각하고 만든 요약/마크다운 시도]",
+        summary="표로 착각한 요약",
+        bboxes=[BBox(x0=0, y0=0, x1=595, y1=200)],
+        metadata={"source": "vlm", "layout_label": "table"},
+    )
+
+    with (
+        patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
+        patch("document_parser.parsing.loaders.pdf.graph.extract_native", return_value=[]),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], [], []),  # DI가 표를 하나도 못 찾음
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            return_value=[misclassified_element],
+        ),
+    ):
+        result = graph.invoke({"page": page, "page_number": 1, "raw_elements": []})
+
+    elements = result["elements"]
+    assert len(elements) == 1
+    assert elements[0].type == ElementType.TEXT
+    assert "plain numbered text" in elements[0].text
+    assert elements[0].metadata.get("misclassified_as_table") is True
+    doc.close()
+
+
 def test_merge_attaches_nearby_paragraphs_to_table_element():
     """DI가 include_text=False라 TEXT 요소로는 안 만든 문단이라도, 표 바로
     근처에 있으면 그 표 요소의 metadata["nearby_paragraphs"]에 붙어야 한다
@@ -419,7 +466,23 @@ def test_mixed_content_classified_with_real_layout_labels(engine):
     text/table)이 최종 출력까지 그대로 이어지는지, 그리고 위→아래 읽기
     순서로 나오는지 확인한다. 표는 이제 azure_di+vlm 경로를 타므로(native가
     아니라) 이 둘은 mock — 이 테스트의 목적은 레이아웃 모델의 실제 라벨/순서
-    분류이지 azure_di/vlm 라이브 호출 자체가 아니다."""
+    분류이지 azure_di/vlm 라이브 호출 자체가 아니다.
+
+    azure_di mock이 이 표 위치와 겹치는 DetectedTable을 돌려주게 해야 한다 —
+    안 그러면 "표로 오분류된 일반 텍스트" 복구 로직(graph.py의
+    _enrich_table_element, 실측으로 표 전체가 표로 오분류돼 본문이 유실된
+    문제를 고치려고 추가함)이 이 그리드 표(실제 텍스트가 있음)까지
+    TEXT로 되돌려버려서, 이 테스트가 원래 확인하려던 "표 라벨이 끝까지
+    유지되는지"를 볼 수 없게 된다."""
+    from document_parser.parsing.loaders.pdf.azure_di import DetectedTable
+
+    # _mixed_content_pdf()가 그리는 실제 표 좌표(x0,y0,x1,y1 = 72,160,500,260)와
+    # 겹치는 가짜 DetectedTable — PP-DocLayoutV2가 찾은 실제 표 박스와 거의
+    # 같은 위치라 IoU 매칭이 성공한다.
+    fake_table = DetectedTable(
+        html="<table><tr><td>R0C0</td></tr></table>",
+        bboxes=[BBox(x0=72, y0=160, x1=500, y1=260)],
+    )
 
     def fake_caption_figures(page, page_number, boxes):
         return [
@@ -441,7 +504,7 @@ def test_mixed_content_classified_with_real_layout_labels(engine):
     with (
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], [], []),
+            return_value=([], [fake_table], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",

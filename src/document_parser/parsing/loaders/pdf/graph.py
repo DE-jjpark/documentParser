@@ -211,19 +211,31 @@ def _html_table_to_markdown(html: str) -> str:
     return "\n".join(lines)
 
 
+# PP-DocLayoutV2가 "table"이라고 했는데 AzureDI가 실제 표 구조를 그 자리에서
+# 못 찾았고, 그 영역에 native로 뽑을 수 있는 텍스트가 이 정도 이상 있으면
+# "표가 아니라 일반 텍스트를 표로 오분류한 것"으로 본다 — 실측으로 발견한
+# 문제: 페이지 전체(조항 여러 개짜리 본문)가 표 하나로 오분류돼서, 원문이
+# 통째로 VLM의 추상적 요약으로 대체되며 유실됐었다. 표 구조는 잃어도 원문
+# 보존이 우선이라, 이 경우 type도 TABLE→TEXT로 바로잡고 원문을 text로 쓴다.
+_MISCLASSIFIED_TABLE_MIN_CHARS = 40
+
+
 def _enrich_table_element(
     element: DocumentElement,
     tables: list[DetectedTable],
     paragraphs: list[ContextParagraph],
+    page: Any,
 ) -> DocumentElement:
     if element.type != ElementType.TABLE or not element.bboxes:
         return element
 
     updates: dict = {}
     metadata = dict(element.metadata)
+    matched = False
     if tables:
         match = _best_matching_table(element.bboxes[0], tables)
         if match is not None:
+            matched = True
             metadata["html"] = match.html
             # DI가 실제로 표를 찾았으면 그 구조에서 뽑은 마크다운이 VLM 자체
             # 마크다운(그냥 이미지 보고 추측한 것)보다 정확하니 text를 덮어쓴다
@@ -231,6 +243,15 @@ def _enrich_table_element(
             markdown = _html_table_to_markdown(match.html)
             if markdown:
                 updates["text"] = markdown
+
+    if not matched and page is not None:
+        bbox = element.bboxes[0]
+        native_text = page.get_text("text", clip=(bbox.x0, bbox.y0, bbox.x1, bbox.y1)).strip()
+        if len(native_text) >= _MISCLASSIFIED_TABLE_MIN_CHARS:
+            updates["text"] = native_text
+            updates["type"] = ElementType.TEXT
+            metadata["misclassified_as_table"] = True
+
     if paragraphs:
         nearby = _nearby_paragraph_texts(element.bboxes[0], paragraphs)
         if nearby:
@@ -247,8 +268,13 @@ def _merge(state: PageState) -> dict:
     elements = sorted(state["raw_elements"], key=_merge_key)
     tables = state.get("azure_di_tables", [])
     paragraphs = state.get("azure_di_paragraphs", [])
-    if tables or paragraphs:
-        elements = [_enrich_table_element(el, tables, paragraphs) for el in elements]
+    page = state.get("page")
+    has_table_element = any(el.type == ElementType.TABLE for el in elements)
+    # tables/paragraphs가 둘 다 비어 있어도(DI가 표를 하나도 못 찾은 경우
+    # 포함) 표로 분류된 요소가 있으면 오분류 복구 로직(native 폴백)을 위해
+    # 여전히 돌려야 한다 — 그래서 has_table_element도 조건에 넣는다.
+    if tables or paragraphs or (page is not None and has_table_element):
+        elements = [_enrich_table_element(el, tables, paragraphs, page) for el in elements]
     return {"elements": elements}
 
 
