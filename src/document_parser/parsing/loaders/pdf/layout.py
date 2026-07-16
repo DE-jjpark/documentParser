@@ -204,24 +204,26 @@ def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLay
 
 
 def route_page(layout: PageLayout) -> str:
-    """페이지 라우팅 규칙 (리뷰 피드백으로 수정 — 원래는 "그림 있음 OR
-    텍스트 레이어 없음"이면 페이지 전체를 AzureDI로 보냈는데, 그러면 텍스트
-    레이어가 멀쩡히 있어도 그림 하나 때문에 DI가 페이지 전체 텍스트를 다시
-    추출하게 돼서 native가 이미 더 정확히 할 수 있는 일을 중복으로 하고
-    있었다):
+    """페이지 라우팅 규칙 — 3분기.
 
-    - 텍스트 레이어가 없음(스캔 문서) → 원본 텍스트를 읽을 방법이 없으니
-      AzureDI(페이지 전체) + VLM(그림·표 있으면 캡션/HTML 추출)
-    - 텍스트 레이어는 있는데 그림·표도 있음 → 순수 텍스트는 native로 정확하게
-      뽑고 그림·표만 VLM으로 처리 (AzureDI 불필요) — has_figures는 표 포함
-      기준이라(_FIGURE_LABELS 참고), 표만 있고 다른 그림이 없는 페이지도
-      여기로 온다.
-    - 텍스트만 있고 텍스트 레이어도 있음 → native만
+    - 텍스트 레이어가 있고 그림·표가 없음(순수 텍스트) → native만.
+    - 텍스트 레이어가 있고 그림·표도 있음 → 순수 텍스트는 native가 이미
+      정확하게 뽑으니 그대로 두고, AzureDI는 "표 구조(HTML)만" 뽑는 용도로만
+      페이지 전체를 한 번 더 분석하고(문단 텍스트는 버림 — native와 중복),
+      VLM은 그림 캡션 + 표 요약을 담당 — native+azure_di+vlm 셋 다 병렬 실행
+      후 병합(azure_di가 찾은 표와 VLM/PaddleX 표 박스는 bbox 겹침으로
+      매칭해서 하나의 표 요소로 합친다, graph.py의 merge 노드 참고).
+    - 텍스트 레이어가 없음(스캔) → 원본 텍스트를 읽을 방법이 없으니 AzureDI가
+      페이지 전체(문단 텍스트 + 표 구조 둘 다) 분석 + VLM(그림 캡션/표 요약)
+      병렬 실행 후 병합.
 
-    반환값: "native" | "native_and_vlm" | "azure_di_and_vlm"
+    has_figures는 표 포함 기준이라(_FIGURE_LABELS 참고), 표만 있고 다른
+    그림이 없는 페이지도 두 번째/세 번째 분기로 온다.
+
+    반환값: "native" | "native_and_azure_di_and_vlm" | "azure_di_and_vlm"
     """
     if not layout.has_text_layer:
         return "azure_di_and_vlm"
     if layout.has_figures:
-        return "native_and_vlm"
+        return "native_and_azure_di_and_vlm"
     return "native"

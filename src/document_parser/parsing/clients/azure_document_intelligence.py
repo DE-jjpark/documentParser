@@ -26,8 +26,21 @@ class LayoutParagraph:
 
 
 @dataclass
+class LayoutTable:
+    """DI가 감지한 표 하나 — 실제 행/열/병합 셀 구조를 담은 HTML.
+
+    PP-DocLayoutV2가 찾은 표 박스와는 별개의 검출 결과라 id가 서로 없다 —
+    호출자(graph.py의 merge 노드)가 bbox 겹침으로 어느 PaddleX 표 박스와
+    짝인지 판단한다."""
+
+    html: str
+    bboxes: list[tuple[float, float, float, float]] = field(default_factory=list)
+
+
+@dataclass
 class AzureLayoutResult:
     paragraphs: list[LayoutParagraph]
+    tables: list[LayoutTable] = field(default_factory=list)
 
 
 class AzureDocumentIntelligenceClient:
@@ -54,15 +67,20 @@ class AzureDocumentIntelligenceClient:
         )
 
     def analyze_layout(self, image_bytes: bytes) -> AzureLayoutResult:
-        """페이지 이미지 1장을 통째로 보낸다(다이어그램 메모: 크롭 없이 전체
-        페이지 — 어차피 페이지 단위 과금)."""
+        """페이지(또는 표 크롭) 이미지 1장을 통째로 보낸다(다이어그램 메모:
+        크롭 크기와 무관하게 페이지당 과금이라 크롭 없이 페이지 전체를 한
+        번에 요청한다)."""
         poller = self._client.begin_analyze_document("prebuilt-layout", body=image_bytes)
         result = poller.result()
         paragraphs = [
             LayoutParagraph(text=p.content, bboxes=_polygon_to_bboxes(p.bounding_regions))
             for p in (result.paragraphs or [])
         ]
-        return AzureLayoutResult(paragraphs=paragraphs)
+        tables = [
+            LayoutTable(html=_table_to_html(t), bboxes=_polygon_to_bboxes(t.bounding_regions))
+            for t in (result.tables or [])
+        ]
+        return AzureLayoutResult(paragraphs=paragraphs, tables=tables)
 
 
 def _polygon_to_bboxes(bounding_regions) -> list[tuple[float, float, float, float]]:
@@ -78,3 +96,40 @@ def _polygon_to_bboxes(bounding_regions) -> list[tuple[float, float, float, floa
         ys = region.polygon[1::2]
         boxes.append((min(xs), min(ys), max(xs), max(ys)))
     return boxes
+
+
+def _escape_html(value: str) -> str:
+    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _table_to_html(table) -> str:
+    """DocumentTable(row_count, column_count, cells) -> <table> HTML.
+
+    cells는 (row_index, column_index)로 좌상단 위치만 갖고, row_span/column_span
+    만큼 그 아래·오른쪽 칸까지 차지한다 — 병합으로 덮이는 칸은 <td>를 아예
+    안 만들어야 브라우저/TEDS 파서가 표를 올바르게 그린다(그래서 grid에
+    "이 칸은 이미 누가 차지함"만 표시하고, 셀의 좌상단 칸일 때만 실제 <td>를
+    만든다)."""
+    grid: dict[tuple[int, int], object] = {}
+    for cell in table.cells:
+        row_span = cell.row_span or 1
+        col_span = cell.column_span or 1
+        for r in range(cell.row_index, cell.row_index + row_span):
+            for c in range(cell.column_index, cell.column_index + col_span):
+                grid[(r, c)] = cell if (r == cell.row_index and c == cell.column_index) else None
+
+    rows_html = []
+    for r in range(table.row_count):
+        cells_html = []
+        for c in range(table.column_count):
+            cell = grid.get((r, c))
+            if cell is None:
+                continue
+            attrs = ""
+            if cell.row_span and cell.row_span > 1:
+                attrs += f' rowspan="{cell.row_span}"'
+            if cell.column_span and cell.column_span > 1:
+                attrs += f' colspan="{cell.column_span}"'
+            cells_html.append(f"<td{attrs}>{_escape_html(cell.content or '')}</td>")
+        rows_html.append(f"<tr>{''.join(cells_html)}</tr>")
+    return f"<table>{''.join(rows_html)}</table>"

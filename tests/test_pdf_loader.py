@@ -1,4 +1,4 @@
-"""pdf 로더의 페이지별 라우팅(native / native+vlm / azure_di+vlm) 테스트.
+"""pdf 로더의 페이지별 라우팅(native / native+azure_di+vlm / azure_di+vlm) 테스트.
 
 fixture 파일 대신 pymupdf로 그 자리에서 작은 합성 PDF를 만든다(기존
 text 로더 테스트의 "hello world" 스타일과 동일).
@@ -8,10 +8,12 @@ layout.analyze_page()는 실제로(설치된 것 기준: 'layout' extra + 가중
 — 둘 다 이 합성 페이지들을 올바르게 분류한다. azure_di/vlm은 graph.py가
 호출하는 지점에서 mock한다 — 실제 자격증명이 이 환경에 없어서다.
 
-라우팅 규칙(리뷰 피드백으로 수정, layout.route_page 참고):
-  - 텍스트 레이어 있음 + 그림 없음  -> native만
-  - 텍스트 레이어 있음 + 그림 있음  -> native(텍스트) + vlm(그림 캡션) — AzureDI는 안 탐
-  - 텍스트 레이어 없음(스캔 문서)   -> azure_di(페이지 전체) + vlm(그림 있으면)
+라우팅 규칙(layout.route_page 참고):
+  - 텍스트 레이어 있음 + 그림·표 없음  -> native만
+  - 텍스트 레이어 있음 + 그림·표 있음  -> native(순수 텍스트) + azure_di(표 구조만,
+    include_text=False) + vlm(그림 캡션/표 요약) 셋 다 병렬
+  - 텍스트 레이어 없음(스캔 문서)      -> azure_di(페이지 전체: 문단+표 구조) +
+    vlm(그림 캡션/표 요약)
 """
 
 import os
@@ -112,10 +114,9 @@ def test_text_only_page_takes_native_route(engine):
     assert element.metadata["source"] == "native"
 
 
-def test_page_with_figure_and_text_layer_takes_native_and_vlm_not_azure_di(engine):
-    """텍스트 레이어가 있는 페이지에 그림이 있어도 AzureDI는 타면 안 된다
-    (native가 이미 텍스트를 정확히 뽑을 수 있어서) — 리뷰 피드백으로 고친
-    라우팅 규칙의 핵심 케이스."""
+def test_page_with_figure_and_text_layer_takes_native_and_azure_di_and_vlm(engine):
+    """텍스트 레이어가 있는 페이지에 그림이 있으면 native(순수 텍스트) +
+    azure_di(표 구조만) + vlm(그림 캡션) 셋 다 실행돼야 한다."""
     fake_vlm_element = DocumentElement(
         type=ElementType.IMAGE,
         text="from vlm",
@@ -125,7 +126,10 @@ def test_page_with_figure_and_text_layer_takes_native_and_vlm_not_azure_di(engin
     )
 
     with (
-        patch("document_parser.parsing.loaders.pdf.graph.extract_with_azure_di") as mock_azure,
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], []),
+        ) as mock_azure,
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
             return_value=[fake_vlm_element],
@@ -133,7 +137,8 @@ def test_page_with_figure_and_text_layer_takes_native_and_vlm_not_azure_di(engin
     ):
         document = engine.parse("doc.pdf", data=_pdf_with_image())
 
-    mock_azure.assert_not_called()
+    mock_azure.assert_called_once()
+    assert mock_azure.call_args.kwargs.get("include_text") is False
     mock_vlm.assert_called_once()
 
     sources = {el.metadata.get("source") for el in document.elements}
@@ -143,15 +148,19 @@ def test_page_with_figure_and_text_layer_takes_native_and_vlm_not_azure_di(engin
 
 
 def test_route_page_routing_rule():
-    assert route_page(PageLayout(has_figures=True, has_text_layer=True)) == "native_and_vlm"
+    assert (
+        route_page(PageLayout(has_figures=True, has_text_layer=True))
+        == "native_and_azure_di_and_vlm"
+    )
     assert route_page(PageLayout(has_figures=False, has_text_layer=True)) == "native"
     assert route_page(PageLayout(has_figures=False, has_text_layer=False)) == "azure_di_and_vlm"
     assert route_page(PageLayout(has_figures=True, has_text_layer=False)) == "azure_di_and_vlm"
 
 
-def test_page_graph_runs_native_and_vlm_in_parallel():
-    """텍스트 레이어 있음 + 그림 있음 케이스에서 native와 vlm이 실제로 같은
-    super-step에서 병렬 실행되는지 확인 — layout을 직접 만들어 강제한다."""
+def test_page_graph_runs_native_and_azure_di_and_vlm_in_parallel():
+    """텍스트 레이어 있음 + 그림 있음 케이스에서 native/azure_di/vlm 셋 다
+    실제로 같은 super-step에서 병렬 실행되는지 확인 — layout을 직접 만들어
+    강제한다."""
     graph = build_page_graph().compile()
 
     fake_layout = PageLayout(has_figures=True, has_text_layer=True, boxes=[])
@@ -163,6 +172,10 @@ def test_page_graph_runs_native_and_vlm_in_parallel():
             return_value=[DocumentElement(text="n", metadata={"source": "native"})],
         ),
         patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], []),
+        ),
+        patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
             return_value=[DocumentElement(text="v", metadata={"source": "vlm"})],
         ),
@@ -170,7 +183,7 @@ def test_page_graph_runs_native_and_vlm_in_parallel():
         result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
 
     sources = {el.metadata["source"] for el in result["elements"]}
-    assert sources == {"native", "vlm"}
+    assert sources == {"native", "azure_di", "vlm"}
 
 
 def test_page_graph_runs_azure_di_and_vlm_in_parallel():
@@ -184,7 +197,7 @@ def test_page_graph_runs_azure_di_and_vlm_in_parallel():
         patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=[DocumentElement(text="a", metadata={"source": "azure_di"})],
+            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -195,6 +208,92 @@ def test_page_graph_runs_azure_di_and_vlm_in_parallel():
 
     sources = {el.metadata["source"] for el in result["elements"]}
     assert sources == {"azure_di", "vlm"}
+
+
+def test_merge_attaches_azure_di_table_html_to_matching_vlm_table_element():
+    """DI가 찾은 표(bbox+html)와 VLM이 캡션한 표 박스(같은 위치)가 겹치면,
+    최종 표 요소의 metadata["html"]에 DI 구조가 채워져야 한다 — PaddleX
+    표 박스와 DI 표 검출은 서로 다른 결과라 id가 없으므로 bbox 겹침으로
+    매칭한다(graph.py의 _best_matching_table)."""
+    graph = build_page_graph().compile()
+
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, boxes=[])
+    vlm_table_element = DocumentElement(
+        type=ElementType.TABLE,
+        text="a table summary",
+        bboxes=[BBox(x0=10, y0=10, x1=110, y1=60)],
+        metadata={"source": "vlm", "layout_label": "table"},
+    )
+    from document_parser.parsing.loaders.pdf.azure_di import DetectedTable
+
+    matching_table = DetectedTable(
+        html="<table><tr><td>1</td></tr></table>",
+        bboxes=[BBox(x0=12, y0=12, x1=108, y1=58)],  # vlm 박스와 거의 겹침
+    )
+
+    with (
+        patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_native",
+            return_value=[],
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], [matching_table]),
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            return_value=[vlm_table_element],
+        ),
+    ):
+        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+
+    table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
+    assert len(table_elements) == 1
+    assert table_elements[0].metadata["html"] == "<table><tr><td>1</td></tr></table>"
+    assert table_elements[0].text == "a table summary"  # VLM 요약은 그대로 유지
+
+
+def test_merge_leaves_table_without_matching_di_table_unchanged():
+    """DI가 그 위치에서 표를 못 찾았으면(bbox가 하나도 안 겹치면), VLM 요약만
+    남고 html은 안 붙는다."""
+    graph = build_page_graph().compile()
+
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, boxes=[])
+    vlm_table_element = DocumentElement(
+        type=ElementType.TABLE,
+        text="a table summary",
+        bboxes=[BBox(x0=10, y0=10, x1=110, y1=60)],
+        metadata={"source": "vlm", "layout_label": "table"},
+    )
+    from document_parser.parsing.loaders.pdf.azure_di import DetectedTable
+
+    unrelated_table = DetectedTable(
+        html="<table><tr><td>unrelated</td></tr></table>",
+        bboxes=[BBox(x0=500, y0=500, x1=600, y1=550)],  # 전혀 다른 위치
+    )
+
+    with (
+        patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_native",
+            return_value=[],
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], [unrelated_table]),
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            return_value=[vlm_table_element],
+        ),
+    ):
+        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+
+    table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
+    assert len(table_elements) == 1
+    assert "html" not in table_elements[0].metadata
+    assert table_elements[0].text == "a table summary"
 
 
 def _mixed_content_pdf() -> bytes:
@@ -263,8 +362,38 @@ def _multi_figure_pdf() -> bytes:
 def test_mixed_content_classified_with_real_layout_labels(engine):
     """제목/본문/표가 섞인 페이지에서 25개 카테고리 중 실제 라벨(paragraph_title/
     text/table)이 최종 출력까지 그대로 이어지는지, 그리고 위→아래 읽기
-    순서로 나오는지 확인한다."""
-    document = engine.parse("mixed.pdf", data=_mixed_content_pdf())
+    순서로 나오는지 확인한다. 표는 이제 azure_di+vlm 경로를 타므로(native가
+    아니라) 이 둘은 mock — 이 테스트의 목적은 레이아웃 모델의 실제 라벨/순서
+    분류이지 azure_di/vlm 라이브 호출 자체가 아니다."""
+
+    def fake_caption_figures(page, page_number, boxes):
+        return [
+            DocumentElement(
+                type=ElementType.TABLE if b.label == "table" else ElementType.IMAGE,
+                text="fake vlm output",
+                page=page_number,
+                bboxes=[BBox(x0=b.bbox[0], y0=b.bbox[1], x1=b.bbox[2], y1=b.bbox[3])],
+                metadata={
+                    "source": "vlm",
+                    "layout_label": b.label,
+                    "layout_cls_id": b.cls_id,
+                    "layout_box_index": b.box_index,
+                },
+            )
+            for b in boxes
+        ]
+
+    with (
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], []),
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            side_effect=fake_caption_figures,
+        ),
+    ):
+        document = engine.parse("mixed.pdf", data=_mixed_content_pdf())
 
     labels = [el.metadata.get("layout_label") for el in document.elements]
     types = [el.type for el in document.elements]
@@ -296,7 +425,7 @@ def test_scanned_page_without_text_layer_routes_to_azure_di_and_vlm(engine):
     )
     with patch(
         "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-        return_value=[fake_azure_element],
+        return_value=([fake_azure_element], []),
     ):
         document = engine.parse("scanned.pdf", data=_scanned_no_text_layer_pdf())
 
@@ -307,8 +436,10 @@ def test_scanned_page_without_text_layer_routes_to_azure_di_and_vlm(engine):
 @requires_real_layout_model
 def test_multiple_figures_merge_in_reading_order_not_insertion_order(engine):
     """그림이 여러 개일 때, PDF에 삽입된 순서가 아니라 실제 페이지상 위치
-    (위→아래) 기준으로 병합되는지 확인한다. 텍스트 레이어가 있으므로
-    native+vlm 경로(azure_di는 안 탐) — vlm만 mock, native는 실제 동작."""
+    (위→아래) 기준으로 병합되는지 확인한다. 텍스트 레이어 + 그림이 있으므로
+    native+azure_di+vlm 경로를 타는데(azure_di는 표 구조만 찾으니 그림만
+    있는 이 문서에선 실제로는 아무것도 못 찾음), vlm/azure_di 둘 다 mock하고
+    native는 실제로 동작하게 둔다."""
 
     def fake_caption_figures(page, page_number, boxes):
         return [
@@ -322,9 +453,15 @@ def test_multiple_figures_merge_in_reading_order_not_insertion_order(engine):
             for b in boxes
         ]
 
-    with patch(
-        "document_parser.parsing.loaders.pdf.graph.caption_figures",
-        side_effect=fake_caption_figures,
+    with (
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], []),
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            side_effect=fake_caption_figures,
+        ),
     ):
         document = engine.parse("multi_fig.pdf", data=_multi_figure_pdf())
 
@@ -344,7 +481,9 @@ def test_azure_di_real_call(engine):
     없는 환경(CI 등)에서는 그냥 skip된다.
 
     텍스트 레이어가 없는 페이지(_scanned_pdf_with_text)를 써야 한다 —
-    텍스트 레이어가 있으면 라우팅 규칙상 AzureDI를 아예 안 타기 때문이다."""
+    include_text=True(텍스트 레이어 없을 때만)로 문단 텍스트를 실제로
+    검증하려는 목적이라, 텍스트 레이어가 있으면 include_text=False가 돼서
+    이 검증 자체가 성립하지 않는다."""
     with patch(
         "document_parser.parsing.loaders.pdf.graph.caption_figures",
         return_value=[],
@@ -362,9 +501,14 @@ def test_vlm_real_call(engine):
     """DATABRICKS_HOST/DATABRICKS_TOKEN이 실제로 설정돼 있을 때만 도는 라이브
     검증 — in4u Databricks AI Gateway(Claude Sonnet 4.6)에 진짜 크롭 이미지를
     보내 캡션이 정상적으로 돌아오는지 확인한다. _pdf_with_image()는 텍스트
-    레이어가 있어 native+vlm 경로를 타므로(azure_di는 아예 안 불림) 별도
-    mock이 필요 없다."""
-    document = engine.parse("doc.pdf", data=_pdf_with_image())
+    레이어 + 그림이 있어 native+azure_di+vlm 경로를 타므로, 이 테스트 목적
+    (VLM 캡션 검증)과 무관한 azure_di는 mock한다(azure 자격증명 없이도 이
+    테스트만 따로 돌아가야 하므로)."""
+    with patch(
+        "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+        return_value=([], []),
+    ):
+        document = engine.parse("doc.pdf", data=_pdf_with_image())
 
     vlm_elements = [el for el in document.elements if el.metadata.get("source") == "vlm"]
     assert len(vlm_elements) >= 1
