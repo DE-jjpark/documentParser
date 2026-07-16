@@ -17,6 +17,7 @@ layout.analyze_page()는 실제로(설치된 것 기준: 'layout' extra + 가중
 """
 
 import os
+from io import BytesIO
 from unittest.mock import patch
 
 import pytest
@@ -189,7 +190,9 @@ def test_page_graph_runs_native_and_azure_di_and_vlm_in_parallel():
             return_value=[DocumentElement(text="v", metadata={"source": "vlm"})],
         ),
     ):
-        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+        result = graph.invoke(
+            {"page": None, "plumber_page": None, "page_number": 1, "raw_elements": []}
+        )
 
     sources = {el.metadata["source"] for el in result["elements"]}
     assert sources == {"native", "azure_di", "vlm"}
@@ -258,7 +261,9 @@ def test_merge_attaches_azure_di_table_html_to_matching_vlm_table_element():
             return_value=[vlm_table_element],
         ),
     ):
-        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+        result = graph.invoke(
+            {"page": None, "plumber_page": None, "page_number": 1, "raw_elements": []}
+        )
 
     table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
     assert len(table_elements) == 1
@@ -301,7 +306,9 @@ def test_merge_leaves_table_without_matching_di_table_unchanged():
             return_value=[vlm_table_element],
         ),
     ):
-        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+        result = graph.invoke(
+            {"page": None, "plumber_page": None, "page_number": 1, "raw_elements": []}
+        )
 
     table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
     assert len(table_elements) == 1
@@ -316,6 +323,8 @@ def test_merge_recovers_misclassified_table_using_native_text():
     TEXT로 되돌리고 원문을 text로 써야 한다 — 실측으로 발견한 문제(페이지
     전체가 표로 오분류돼서 본문이 VLM 요약으로 통째로 대체되며 유실된 것)의
     회귀 테스트."""
+    pdfplumber = pytest.importorskip("pdfplumber", reason="pdf extra not installed")
+
     doc = pymupdf.open()
     page = doc.new_page()
     # pymupdf 기본 폰트가 한글 글리프를 지원 안 해서(찍히면 전부 '·'로 나옴)
@@ -323,6 +332,10 @@ def test_merge_recovers_misclassified_table_using_native_text():
     # 수 있는 텍스트 분량"이라 무관하다.
     long_text = "This clause is actually plain numbered text, not a table. " * 3
     page.insert_text((72, 72), long_text, fontsize=10)
+    # 실제 복구 로직은 pdfplumber로 텍스트를 뽑으므로, 같은 PDF 바이트를
+    # pdfplumber로도 열어서 진짜 plumber_page를 넘겨야 회귀 테스트가 유효하다.
+    pdoc = pdfplumber.open(BytesIO(doc.tobytes()))
+    plumber_page = pdoc.pages[0]
 
     graph = build_page_graph().compile()
     fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
@@ -346,13 +359,16 @@ def test_merge_recovers_misclassified_table_using_native_text():
             return_value=[misclassified_element],
         ),
     ):
-        result = graph.invoke({"page": page, "page_number": 1, "raw_elements": []})
+        result = graph.invoke(
+            {"page": page, "plumber_page": plumber_page, "page_number": 1, "raw_elements": []}
+        )
 
     elements = result["elements"]
     assert len(elements) == 1
     assert elements[0].type == ElementType.TEXT
     assert "plain numbered text" in elements[0].text
     assert elements[0].metadata.get("misclassified_as_table") is True
+    pdoc.close()
     doc.close()
 
 
@@ -389,7 +405,9 @@ def test_merge_attaches_nearby_paragraphs_to_table_element():
             return_value=[vlm_table_element],
         ),
     ):
-        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+        result = graph.invoke(
+            {"page": None, "plumber_page": None, "page_number": 1, "raw_elements": []}
+        )
 
     table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
     assert len(table_elements) == 1

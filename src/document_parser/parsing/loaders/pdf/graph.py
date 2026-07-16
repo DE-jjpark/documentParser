@@ -39,6 +39,10 @@ _ROUTE_TARGETS: dict[str, str | list[str]] = {
 class PageState(TypedDict, total=False):
     page: Any  # pymupdf.Page — 그래프 상태 스키마 자체엔 pymupdf 타입을 안 써서
     #             'pdf' extra 없이도 이 모듈을 import할 수 있게 한다.
+    # pdfplumber.Page — native(순수 텍스트) 추출은 이걸로 한다(요청:
+    # "plumber 사용할거고 native일 때 사용하도록"). pymupdf page와 좌표계가
+    # 같아서(포인트, 좌상단 원점) 같은 bbox를 그대로 재사용한다.
+    plumber_page: Any
     page_number: int
     layout: PageLayout
     # azure_di/vlm(/native)이 같은 super-step에서 병렬 실행되며 둘 다 이
@@ -66,7 +70,7 @@ def _route(state: PageState) -> str | list[str]:
 
 
 def _native(state: PageState) -> dict:
-    elements = extract_native(state["page"], state["page_number"], state["layout"])
+    elements = extract_native(state["plumber_page"], state["page_number"], state["layout"])
     return {"raw_elements": elements}
 
 
@@ -220,11 +224,25 @@ def _html_table_to_markdown(html: str) -> str:
 _MISCLASSIFIED_TABLE_MIN_CHARS = 40
 
 
+def _extract_plumber_text(plumber_page: Any, bbox: BBox) -> str:
+    """pdfplumber는 bbox가 페이지 경계를 살짝이라도 벗어나면 예외를 던진다
+    (pymupdf는 알아서 잘라주는 것과 다름) — 레이아웃 모델이 준 bbox가 반올림
+    등으로 아주 조금 넘어갈 수 있어서, 크롭 전에 페이지 크기 안으로 클램프
+    해준다."""
+    x0 = max(0.0, min(bbox.x0, plumber_page.width))
+    y0 = max(0.0, min(bbox.y0, plumber_page.height))
+    x1 = max(0.0, min(bbox.x1, plumber_page.width))
+    y1 = max(0.0, min(bbox.y1, plumber_page.height))
+    if x1 <= x0 or y1 <= y0:
+        return ""
+    return (plumber_page.crop((x0, y0, x1, y1)).extract_text() or "").strip()
+
+
 def _enrich_table_element(
     element: DocumentElement,
     tables: list[DetectedTable],
     paragraphs: list[ContextParagraph],
-    page: Any,
+    plumber_page: Any,
 ) -> DocumentElement:
     if element.type != ElementType.TABLE or not element.bboxes:
         return element
@@ -244,9 +262,8 @@ def _enrich_table_element(
             if markdown:
                 updates["text"] = markdown
 
-    if not matched and page is not None:
-        bbox = element.bboxes[0]
-        native_text = page.get_text("text", clip=(bbox.x0, bbox.y0, bbox.x1, bbox.y1)).strip()
+    if not matched and plumber_page is not None:
+        native_text = _extract_plumber_text(plumber_page, element.bboxes[0])
         if len(native_text) >= _MISCLASSIFIED_TABLE_MIN_CHARS:
             updates["text"] = native_text
             updates["type"] = ElementType.TEXT
@@ -268,13 +285,13 @@ def _merge(state: PageState) -> dict:
     elements = sorted(state["raw_elements"], key=_merge_key)
     tables = state.get("azure_di_tables", [])
     paragraphs = state.get("azure_di_paragraphs", [])
-    page = state.get("page")
+    plumber_page = state.get("plumber_page")
     has_table_element = any(el.type == ElementType.TABLE for el in elements)
     # tables/paragraphs가 둘 다 비어 있어도(DI가 표를 하나도 못 찾은 경우
     # 포함) 표로 분류된 요소가 있으면 오분류 복구 로직(native 폴백)을 위해
     # 여전히 돌려야 한다 — 그래서 has_table_element도 조건에 넣는다.
-    if tables or paragraphs or (page is not None and has_table_element):
-        elements = [_enrich_table_element(el, tables, paragraphs, page) for el in elements]
+    if tables or paragraphs or (plumber_page is not None and has_table_element):
+        elements = [_enrich_table_element(el, tables, paragraphs, plumber_page) for el in elements]
     return {"elements": elements}
 
 
