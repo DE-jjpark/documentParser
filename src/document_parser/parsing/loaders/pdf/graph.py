@@ -26,6 +26,7 @@ from document_parser.parsing.loaders.pdf.vlm import caption_figures
 _ROUTE_TARGETS: dict[str, str | list[str]] = {
     "native": "native",
     "native_and_azure_di_and_vlm": ["native", "azure_di", "vlm"],
+    "native_and_vlm": ["native", "vlm"],
     "azure_di_and_vlm": ["azure_di", "vlm"],
 }
 

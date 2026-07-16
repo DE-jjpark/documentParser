@@ -114,9 +114,10 @@ def test_text_only_page_takes_native_route(engine):
     assert element.metadata["source"] == "native"
 
 
-def test_page_with_figure_and_text_layer_takes_native_and_azure_di_and_vlm(engine):
-    """텍스트 레이어가 있는 페이지에 그림이 있으면 native(순수 텍스트) +
-    azure_di(표 구조만) + vlm(그림 캡션) 셋 다 실행돼야 한다."""
+def test_page_with_image_and_text_layer_takes_native_and_vlm_not_azure_di(engine):
+    """텍스트 레이어가 있는 페이지에 표 없이 이미지만 있으면 AzureDI는 아예
+    스킵돼야 한다 — DI 역할이 표 구조 추출뿐이라, 표가 없으면 태워봤자
+    매칭될 게 없어 완전히 헛수고(불필요한 호출/비용)라서."""
     fake_vlm_element = DocumentElement(
         type=ElementType.IMAGE,
         text="from vlm",
@@ -126,10 +127,7 @@ def test_page_with_figure_and_text_layer_takes_native_and_azure_di_and_vlm(engin
     )
 
     with (
-        patch(
-            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], []),
-        ) as mock_azure,
+        patch("document_parser.parsing.loaders.pdf.graph.extract_with_azure_di") as mock_azure,
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
             return_value=[fake_vlm_element],
@@ -137,8 +135,7 @@ def test_page_with_figure_and_text_layer_takes_native_and_azure_di_and_vlm(engin
     ):
         document = engine.parse("doc.pdf", data=_pdf_with_image())
 
-    mock_azure.assert_called_once()
-    assert mock_azure.call_args.kwargs.get("include_text") is False
+    mock_azure.assert_not_called()
     mock_vlm.assert_called_once()
 
     sources = {el.metadata.get("source") for el in document.elements}
@@ -149,21 +146,33 @@ def test_page_with_figure_and_text_layer_takes_native_and_azure_di_and_vlm(engin
 
 def test_route_page_routing_rule():
     assert (
-        route_page(PageLayout(has_figures=True, has_text_layer=True))
+        route_page(PageLayout(has_figures=True, has_text_layer=True, has_table=True))
         == "native_and_azure_di_and_vlm"
     )
-    assert route_page(PageLayout(has_figures=False, has_text_layer=True)) == "native"
-    assert route_page(PageLayout(has_figures=False, has_text_layer=False)) == "azure_di_and_vlm"
-    assert route_page(PageLayout(has_figures=True, has_text_layer=False)) == "azure_di_and_vlm"
+    assert (
+        route_page(PageLayout(has_figures=True, has_text_layer=True, has_table=False))
+        == "native_and_vlm"
+    )
+    assert (
+        route_page(PageLayout(has_figures=False, has_text_layer=True, has_table=False)) == "native"
+    )
+    assert (
+        route_page(PageLayout(has_figures=False, has_text_layer=False, has_table=False))
+        == "azure_di_and_vlm"
+    )
+    assert (
+        route_page(PageLayout(has_figures=True, has_text_layer=False, has_table=True))
+        == "azure_di_and_vlm"
+    )
 
 
 def test_page_graph_runs_native_and_azure_di_and_vlm_in_parallel():
-    """텍스트 레이어 있음 + 그림 있음 케이스에서 native/azure_di/vlm 셋 다
+    """텍스트 레이어 있음 + 표 있음 케이스에서 native/azure_di/vlm 셋 다
     실제로 같은 super-step에서 병렬 실행되는지 확인 — layout을 직접 만들어
     강제한다."""
     graph = build_page_graph().compile()
 
-    fake_layout = PageLayout(has_figures=True, has_text_layer=True, boxes=[])
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
 
     with (
         patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
@@ -217,7 +226,7 @@ def test_merge_attaches_azure_di_table_html_to_matching_vlm_table_element():
     매칭한다(graph.py의 _best_matching_table)."""
     graph = build_page_graph().compile()
 
-    fake_layout = PageLayout(has_figures=True, has_text_layer=True, boxes=[])
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
     vlm_table_element = DocumentElement(
         type=ElementType.TABLE,
         text="a table summary",
@@ -259,7 +268,7 @@ def test_merge_leaves_table_without_matching_di_table_unchanged():
     남고 html은 안 붙는다."""
     graph = build_page_graph().compile()
 
-    fake_layout = PageLayout(has_figures=True, has_text_layer=True, boxes=[])
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
     vlm_table_element = DocumentElement(
         type=ElementType.TABLE,
         text="a table summary",
