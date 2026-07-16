@@ -58,7 +58,12 @@ def caption_figures(
                 # layout_label: PP-DocLayoutV2의 25개 카테고리 중 실제 감지된 라벨
                 # (예: "chart", "image", "seal" 등) — 그림이라는 것만 아는 게
                 # 아니라 어떤 종류의 그림인지까지 남겨둔다.
-                metadata={"source": "vlm", "layout_label": box.label},
+                metadata={
+                    "source": "vlm",
+                    "layout_label": box.label,
+                    "layout_cls_id": box.cls_id,
+                    "layout_box_index": box.box_index,
+                },
             )
         )
     return elements

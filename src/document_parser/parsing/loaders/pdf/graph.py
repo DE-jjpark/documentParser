@@ -1,7 +1,7 @@
 """페이지 단위 LangGraph 그래프 조립. pdf 로더 내부 구현이다.
 
-다이어그램 그대로: 레이아웃 분석 → (Only Text + 텍스트 레이어 있음) 네이티브
-추출 → 아니면(그림 있음 / 텍스트 레이어 없음) AzureDI+VLM 병렬 실행 → 병합.
+레이아웃 분석 → 3-way 라우팅(layout.route_page 참고) → native | native+vlm |
+azure_di+vlm → 병합.
 
 이 그래프는 페이지 1장을 처리하는 단위다 — ``pdf/__init__.py``의 ``load()``가
 문서의 페이지마다 한 번씩 invoke한다. 엔진 자체의 그래프(parsing/graph.py:
@@ -18,9 +18,16 @@ from langgraph.graph import END, START, StateGraph
 
 from document_parser.core.models import DocumentElement
 from document_parser.parsing.loaders.pdf.azure_di import extract_with_azure_di
-from document_parser.parsing.loaders.pdf.layout import PageLayout, analyze_page, needs_heavy_path
+from document_parser.parsing.loaders.pdf.layout import PageLayout, analyze_page, route_page
 from document_parser.parsing.loaders.pdf.native import extract_native
 from document_parser.parsing.loaders.pdf.vlm import caption_figures
+
+# route_page()가 반환하는 논리적 경로 이름 -> 실제로 실행할 노드 이름(들).
+_ROUTE_TARGETS: dict[str, str | list[str]] = {
+    "native": "native",
+    "native_and_vlm": ["native", "vlm"],
+    "azure_di_and_vlm": ["azure_di", "vlm"],
+}
 
 
 class PageState(TypedDict, total=False):
@@ -41,9 +48,7 @@ def _analyze(state: PageState) -> dict:
 
 
 def _route(state: PageState) -> str | list[str]:
-    if needs_heavy_path(state["layout"]):
-        return ["azure_di", "vlm"]
-    return "native"
+    return _ROUTE_TARGETS[route_page(state["layout"])]
 
 
 def _native(state: PageState) -> dict:
@@ -63,11 +68,12 @@ def _vlm(state: PageState) -> dict:
 
 
 def _merge_key(element: DocumentElement) -> tuple[float, float]:
-    """azure_di와 vlm은 같은 super-step에서 병렬 실행되므로 reducer가 합친
-    직후의 순서는 어느 쪽이 먼저 끝났느냐에 달려 있어 신뢰할 수 없다 — bbox
-    위치(top→bottom, left→right) 기준으로 다시 정렬해야 실제 읽기 순서가
-    보장된다. bbox가 없는 요소(지금의 azure_di 페이지 전체 placeholder처럼
-    위치 정보가 아예 없는 경우)는 페이지 맨 위(0, 0)로 취급한다."""
+    """(native 또는 azure_di) + vlm은 같은 super-step에서 병렬 실행되므로
+    reducer가 합친 직후의 순서는 어느 쪽이 먼저 끝났느냐에 달려 있어 신뢰할
+    수 없다 — bbox 위치(top→bottom, left→right) 기준으로 다시 정렬해야 실제
+    읽기 순서가 보장된다. bbox가 없는 요소(지금의 azure_di 페이지 전체
+    placeholder처럼 위치 정보가 아예 없는 경우)는 페이지 맨 위(0, 0)로
+    취급한다."""
     if element.bboxes:
         return (element.bboxes[0].y0, element.bboxes[0].x0)
     return (0.0, 0.0)

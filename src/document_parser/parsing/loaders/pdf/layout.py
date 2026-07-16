@@ -85,11 +85,23 @@ class LayoutBox:
     이 경우 bbox 위치(위→아래, 왼→오른) 기준으로 정렬한다(_reading_order_key
     참고). 휴리스틱 폴백(paddleocr 없을 때)은 애초에 순서를 모르므로 항상
     None이고, 감지된 이미지가 여러 개면 항상 위치 기준으로만 정렬된다.
+
+    cls_id: PP-DocLayoutV2 원본 출력에 있는 카테고리 숫자 코드 — 원래는
+    라우팅 판단(has_figures)과 label 문자열만 쓰고 버렸는데, 파싱 결과와
+    원본 모델 출력을 비교할 때(예: DP-Bench 검증) 필요해서 metadata까지
+    그대로 보존한다. 휴리스틱 폴백은 모른다(None).
+
+    box_index: PP-DocLayoutV2가 반환한 원본 ``result["boxes"]`` 배열에서 이
+    박스의 위치(0부터, 정렬 전 기준) — 페이지 안에서 유일하므로, 파싱 결과를
+    원본 모델 출력 JSON과 대조해서 매핑할 때 이 값을 키로 쓰면 된다(order는
+    많은 박스에서 null이라 이 용도로 못 씀). 휴리스틱 폴백은 모른다(None).
     """
 
     label: str
     bbox: tuple[float, float, float, float]
     order: int | None = None
+    cls_id: int | None = None
+    box_index: int | None = None
 
 
 @dataclass
@@ -155,8 +167,10 @@ def analyze_page(page: pymupdf.Page) -> PageLayout:
                 label=box["label"],
                 bbox=px_to_pt(tuple(box["coordinate"])),
                 order=box.get("order"),
+                cls_id=box.get("cls_id"),
+                box_index=i,
             )
-            for box in result["boxes"]
+            for i, box in enumerate(result["boxes"])
         ]
     )
     return PageLayout(
@@ -183,7 +197,23 @@ def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLay
     )
 
 
-def needs_heavy_path(layout: PageLayout) -> bool:
-    """다이어그램의 분기 규칙: 그림이 있거나 텍스트 레이어가 없으면(스캔 문서)
-    AzureDI+VLM, 텍스트만 있고 텍스트 레이어가 있으면 네이티브 추출."""
-    return layout.has_figures or not layout.has_text_layer
+def route_page(layout: PageLayout) -> str:
+    """페이지 라우팅 규칙 (리뷰 피드백으로 수정 — 원래는 "그림 있음 OR
+    텍스트 레이어 없음"이면 페이지 전체를 AzureDI로 보냈는데, 그러면 텍스트
+    레이어가 멀쩡히 있어도 그림 하나 때문에 DI가 페이지 전체 텍스트를 다시
+    추출하게 돼서 native가 이미 더 정확히 할 수 있는 일을 중복으로 하고
+    있었다):
+
+    - 텍스트 레이어가 없음(스캔 문서) → 원본 텍스트를 읽을 방법이 없으니
+      AzureDI(페이지 전체) + VLM(그림 있으면 캡션)
+    - 텍스트 레이어는 있는데 그림도 있음 → 텍스트는 native로 정확하게 뽑고
+      그림만 VLM으로 캡션 (AzureDI 불필요)
+    - 텍스트만 있고 텍스트 레이어도 있음 → native만
+
+    반환값: "native" | "native_and_vlm" | "azure_di_and_vlm"
+    """
+    if not layout.has_text_layer:
+        return "azure_di_and_vlm"
+    if layout.has_figures:
+        return "native_and_vlm"
+    return "native"
