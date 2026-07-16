@@ -24,7 +24,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from document_parser.core.models import BBox, DocumentElement, ElementType
-from document_parser.parsing.clients.vlm import VLMClient
+from document_parser.parsing.clients.vlm import VLMCaptionResult, VLMClient
 
 if TYPE_CHECKING:
     # 타입 힌트 전용 — layout.py 주석 참고.
@@ -52,13 +52,15 @@ _TABLE_PROMPT = (
 _HARD_TIMEOUT_SEC = 45
 
 
-def _caption_with_hard_timeout(client: VLMClient, image_bytes: bytes, prompt: str) -> str:
+def _caption_with_hard_timeout(
+    client: VLMClient, image_bytes: bytes, prompt: str
+) -> VLMCaptionResult:
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = executor.submit(client.caption_image, image_bytes, prompt)
     try:
         return future.result(timeout=_HARD_TIMEOUT_SEC)
     except concurrent.futures.TimeoutError:
-        return "[VLM 응답 시간 초과로 캡션 생성 실패]"
+        return VLMCaptionResult(text="[VLM 응답 시간 초과로 캡션 생성 실패]", usage=None)
     finally:
         executor.shutdown(wait=False)
 
@@ -100,13 +102,17 @@ def caption_figures(
         }
 
         if box.label == "table":
-            html = _caption_with_hard_timeout(client, image_bytes, _TABLE_PROMPT)
-            metadata["html"] = html
+            result = _caption_with_hard_timeout(client, image_bytes, _TABLE_PROMPT)
+            metadata["html"] = result.text
             element_type = ElementType.TABLE
-            text = _strip_html_tags(html)
+            text = _strip_html_tags(result.text)
         else:
             element_type = ElementType.IMAGE
-            text = _caption_with_hard_timeout(client, image_bytes, _PROMPT)
+            result = _caption_with_hard_timeout(client, image_bytes, _PROMPT)
+            text = result.text
+
+        if result.usage is not None:
+            metadata["vlm_usage"] = result.usage
 
         elements.append(
             DocumentElement(

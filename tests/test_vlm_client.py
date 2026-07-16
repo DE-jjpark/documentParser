@@ -31,6 +31,7 @@ def test_caption_image_returns_response_text(monkeypatch):
     mock_message.content = "a red square"
     mock_response = MagicMock()
     mock_response.choices = [MagicMock(message=mock_message)]
+    mock_response.usage = None
 
     # tracing_is_enabled()는 실제 개발 환경의 LANGSMITH_TRACING 값에 영향받으면
     # 안 되므로(이 테스트는 캡션 배선 자체만 보는 테스트) 명시적으로 꺼둔다 —
@@ -41,10 +42,40 @@ def test_caption_image_returns_response_text(monkeypatch):
     ):
         mock_openai_client.return_value.chat.completions.create.return_value = mock_response
         client = VLMClient()
-        caption = client.caption_image(b"fake-png-bytes", "describe this")
+        result = client.caption_image(b"fake-png-bytes", "describe this")
 
-    assert caption == "a red square"
+    assert result.text == "a red square"
+    assert result.usage is None
     mock_openai_client.return_value.chat.completions.create.assert_called_once()
+
+
+def test_caption_image_captures_token_usage(monkeypatch):
+    """200개 문서 배치 후 "토큰 얼마나 썼어?"에 답을 못 했던 문제 — 응답의
+    usage를 이제 VLMCaptionResult.usage로 그대로 넘겨준다."""
+    monkeypatch.setenv("DATABRICKS_HOST", "adb-1017423463570685.5.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+
+    mock_message = MagicMock()
+    mock_message.content = "a red square"
+    mock_usage = MagicMock()
+    mock_usage.model_dump.return_value = {
+        "prompt_tokens": 120,
+        "completion_tokens": 30,
+        "total_tokens": 150,
+    }
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock(message=mock_message)]
+    mock_response.usage = mock_usage
+
+    with (
+        patch("openai.OpenAI") as mock_openai_client,
+        patch("langsmith.utils.tracing_is_enabled", return_value=False),
+    ):
+        mock_openai_client.return_value.chat.completions.create.return_value = mock_response
+        client = VLMClient()
+        result = client.caption_image(b"fake-png-bytes", "describe this")
+
+    assert result.usage == {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150}
 
 
 def test_langsmith_tracing_disabled_by_default(monkeypatch):
