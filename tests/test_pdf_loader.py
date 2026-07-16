@@ -221,15 +221,18 @@ def test_page_graph_runs_azure_di_and_vlm_in_parallel():
 
 def test_merge_attaches_azure_di_table_html_to_matching_vlm_table_element():
     """DI가 찾은 표(bbox+html)와 VLM이 캡션한 표 박스(같은 위치)가 겹치면,
-    최종 표 요소의 metadata["html"]에 DI 구조가 채워져야 한다 — PaddleX
+    최종 표 요소의 metadata["html"]에 DI 구조가 채워지고 .text도 그 구조에서
+    뽑은 마크다운으로 덮어써야 한다(VLM 자체 마크다운보다 정확하므로) — PaddleX
     표 박스와 DI 표 검출은 서로 다른 결과라 id가 없으므로 bbox 겹침으로
-    매칭한다(graph.py의 _best_matching_table)."""
+    매칭한다(graph.py의 _best_matching_table). .summary(VLM 요약)는 그대로
+    유지돼야 한다."""
     graph = build_page_graph().compile()
 
     fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
     vlm_table_element = DocumentElement(
         type=ElementType.TABLE,
-        text="a table summary",
+        text="| 1 |\n| --- |",  # VLM 자체 마크다운(폴백) — DI 매칭되면 덮어써져야 함
+        summary="a table summary",
         bboxes=[BBox(x0=10, y0=10, x1=110, y1=60)],
         metadata={"source": "vlm", "layout_label": "table"},
     )
@@ -260,7 +263,8 @@ def test_merge_attaches_azure_di_table_html_to_matching_vlm_table_element():
     table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
     assert len(table_elements) == 1
     assert table_elements[0].metadata["html"] == "<table><tr><td>1</td></tr></table>"
-    assert table_elements[0].text == "a table summary"  # VLM 요약은 그대로 유지
+    assert table_elements[0].text == "| 1 |\n| --- |"  # DI 구조에서 뽑은 마크다운으로 덮어씀
+    assert table_elements[0].summary == "a table summary"  # VLM 요약은 그대로 유지
 
 
 def test_merge_leaves_table_without_matching_di_table_unchanged():
@@ -568,13 +572,15 @@ def test_vlm_real_call(engine):
 
 
 def test_extract_mermaid_pulls_out_fenced_code_block():
+    """content 자체가 mermaid 소스가 돼야 한다(요청: "text: ... mermaid 반환") —
+    두 반환값(text로 쓸 것, metadata용) 다 mermaid 소스 그 자체."""
     from document_parser.parsing.loaders.pdf.vlm import _extract_mermaid
 
     response = "```mermaid\ngraph TD;\nA-->B;\n```"
-    remainder, mermaid = _extract_mermaid(response)
+    text, mermaid = _extract_mermaid(response)
 
     assert mermaid == "graph TD;\nA-->B;"
-    assert remainder == "[다이어그램을 Mermaid로 추출함]"
+    assert text == "graph TD;\nA-->B;"
 
 
 def test_extract_mermaid_returns_none_for_plain_caption():

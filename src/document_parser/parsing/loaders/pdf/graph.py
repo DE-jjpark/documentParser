@@ -12,6 +12,7 @@ detect_format → extract → assemble)와 구조는 같은 패턴(StateGraph, T
 from __future__ import annotations
 
 import operator
+from html.parser import HTMLParser
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -161,6 +162,55 @@ def _nearby_paragraph_texts(table_bbox: BBox, paragraphs: list[ContextParagraph]
     return [text for _, text in candidates[:_NEARBY_PARAGRAPH_MAX_COUNT]]
 
 
+class _TableRowsParser(HTMLParser):
+    """azure_document_intelligence.py의 _table_to_html()이 만든 <table><tr><td>
+    구조에서 셀 텍스트만 뽑는다 — 마크다운 표로 다시 그리기 위해."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[str]] = []
+        self._current_row: list[str] | None = None
+        self._current_cell: list[str] = []
+        self._in_cell = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self._current_row = []
+        elif tag in ("td", "th"):
+            self._in_cell = True
+            self._current_cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th"):
+            self._in_cell = False
+            if self._current_row is not None:
+                self._current_row.append("".join(self._current_cell).strip())
+        elif tag == "tr":
+            if self._current_row is not None:
+                self.rows.append(self._current_row)
+            self._current_row = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            self._current_cell.append(data)
+
+
+def _html_table_to_markdown(html: str) -> str:
+    """DI의 실제 표 구조(html)를 마크다운 표로 변환한다 — 병합 셀(colspan/
+    rowspan)은 마크다운 표 자체가 표현 못 하는 개념이라 셀 하나로 뭉뚱그려
+    지므로 구조 정보 손실이 있을 수 있다(그 손실 없는 원본은 metadata["html"]
+    에 그대로 남아있음 — 마크다운은 어디까지나 .text/청킹용 표시)."""
+    parser = _TableRowsParser()
+    parser.feed(html)
+    rows = parser.rows
+    if not rows:
+        return ""
+
+    lines = [f"| {' | '.join(rows[0])} |", f"| {' | '.join(['---'] * len(rows[0]))} |"]
+    lines.extend(f"| {' | '.join(row)} |" for row in rows[1:])
+    return "\n".join(lines)
+
+
 def _enrich_table_element(
     element: DocumentElement,
     tables: list[DetectedTable],
@@ -169,19 +219,28 @@ def _enrich_table_element(
     if element.type != ElementType.TABLE or not element.bboxes:
         return element
 
+    updates: dict = {}
     metadata = dict(element.metadata)
     if tables:
         match = _best_matching_table(element.bboxes[0], tables)
         if match is not None:
             metadata["html"] = match.html
+            # DI가 실제로 표를 찾았으면 그 구조에서 뽑은 마크다운이 VLM 자체
+            # 마크다운(그냥 이미지 보고 추측한 것)보다 정확하니 text를 덮어쓴다
+            # — VLM의 마크다운은 DI가 못 찾았을 때만 그대로 남는 폴백이 된다.
+            markdown = _html_table_to_markdown(match.html)
+            if markdown:
+                updates["text"] = markdown
     if paragraphs:
         nearby = _nearby_paragraph_texts(element.bboxes[0], paragraphs)
         if nearby:
             metadata["nearby_paragraphs"] = nearby
 
-    if metadata == element.metadata:
+    if metadata != element.metadata:
+        updates["metadata"] = metadata
+    if not updates:
         return element
-    return element.model_copy(update={"metadata": metadata})
+    return element.model_copy(update=updates)
 
 
 def _merge(state: PageState) -> dict:

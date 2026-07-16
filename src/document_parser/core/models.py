@@ -45,6 +45,10 @@ class DocumentElement(BaseModel):
     # "e{n}" (1부터) — assemble 노드가 elements 순서(=읽기 순서) 그대로 문서
     # 전체에 매기는 전역 일련번호. 페이지/타입 무관.
     elem_id: str | None = None
+    # TABLE/IMAGE 전용 — 원본 "내용"(text: 표는 마크다운, 이미지는 설명/전사/
+    # Mermaid)과 별도로, VLM이 만든 요약을 따로 둔다. 순수 텍스트류(TEXT/
+    # HEADING/LIST)는 요약이라는 개념 자체가 없어서 항상 None.
+    summary: str | None = None
 
 
 class ParsedDocument(BaseModel):
