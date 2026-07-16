@@ -89,7 +89,12 @@ class VLMClient:
             timeout=60.0,
             max_retries=1,
         )
-        if os.environ.get("LANGCHAIN_TRACING_V2", "").lower() in ("true", "1"):
+        from langsmith.utils import tracing_is_enabled
+
+        # LANGSMITH_TRACING(신규 명칭)과 LANGCHAIN_TRACING_V2(구 명칭) 둘 다
+        # 알아서 확인해주는 langsmith 자체 판별 함수를 쓴다 — 직접 환경변수
+        # 이름 하나만 확인하면 어느 한쪽 명칭을 놓칠 수 있다.
+        if tracing_is_enabled():
             from langsmith.wrappers import wrap_openai
 
             client = wrap_openai(client)

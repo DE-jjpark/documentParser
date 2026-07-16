@@ -32,7 +32,13 @@ def test_caption_image_returns_response_text(monkeypatch):
     mock_response = MagicMock()
     mock_response.choices = [MagicMock(message=mock_message)]
 
-    with patch("openai.OpenAI") as mock_openai_client:
+    # tracing_is_enabled()는 실제 개발 환경의 LANGSMITH_TRACING 값에 영향받으면
+    # 안 되므로(이 테스트는 캡션 배선 자체만 보는 테스트) 명시적으로 꺼둔다 —
+    # 켜져 있으면 wrap_openai()가 이 MagicMock을 감싸면서 mock 동일성이 깨진다.
+    with (
+        patch("openai.OpenAI") as mock_openai_client,
+        patch("langsmith.utils.tracing_is_enabled", return_value=False),
+    ):
         mock_openai_client.return_value.chat.completions.create.return_value = mock_response
         client = VLMClient()
         caption = client.caption_image(b"fake-png-bytes", "describe this")
@@ -42,14 +48,16 @@ def test_caption_image_returns_response_text(monkeypatch):
 
 
 def test_langsmith_tracing_disabled_by_default(monkeypatch):
-    """LANGCHAIN_TRACING_V2이 안 켜져 있으면 wrap_openai를 안 거치고 원본
-    클라이언트를 그대로 쓴다 — 평소엔 langsmith 관련 오버헤드가 전혀 없다."""
+    """tracing_is_enabled()가 False면 wrap_openai를 안 거치고 원본 클라이언트를
+    그대로 쓴다 — 평소엔 langsmith 관련 오버헤드가 전혀 없다. langsmith 자체
+    판별 함수를 쓰므로(LANGSMITH_TRACING/LANGCHAIN_TRACING_V2 둘 다 인식) 여기선
+    그 함수 자체를 mock해서 우리 쪽 분기 로직만 확인한다."""
     monkeypatch.setenv("DATABRICKS_HOST", "adb-1017423463570685.5.azuredatabricks.net")
     monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
-    monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
 
     with (
         patch("openai.OpenAI") as mock_openai_client,
+        patch("langsmith.utils.tracing_is_enabled", return_value=False),
         patch("langsmith.wrappers.wrap_openai") as mock_wrap,
     ):
         client = VLMClient()
@@ -61,10 +69,10 @@ def test_langsmith_tracing_disabled_by_default(monkeypatch):
 def test_langsmith_tracing_wraps_client_when_enabled(monkeypatch):
     monkeypatch.setenv("DATABRICKS_HOST", "adb-1017423463570685.5.azuredatabricks.net")
     monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
-    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
 
     with (
         patch("openai.OpenAI") as mock_openai_client,
+        patch("langsmith.utils.tracing_is_enabled", return_value=True),
         patch("langsmith.wrappers.wrap_openai") as mock_wrap,
     ):
         mock_wrap.return_value = "wrapped-client"
