@@ -182,7 +182,7 @@ def test_page_graph_runs_native_and_azure_di_and_vlm_in_parallel():
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], []),
+            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], [], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -206,7 +206,7 @@ def test_page_graph_runs_azure_di_and_vlm_in_parallel():
         patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], []),
+            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], [], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -248,7 +248,7 @@ def test_merge_attaches_azure_di_table_html_to_matching_vlm_table_element():
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], [matching_table]),
+            return_value=([], [matching_table], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -290,7 +290,7 @@ def test_merge_leaves_table_without_matching_di_table_unchanged():
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], [unrelated_table]),
+            return_value=([], [unrelated_table], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -303,6 +303,48 @@ def test_merge_leaves_table_without_matching_di_table_unchanged():
     assert len(table_elements) == 1
     assert "html" not in table_elements[0].metadata
     assert table_elements[0].text == "a table summary"
+
+
+def test_merge_attaches_nearby_paragraphs_to_table_element():
+    """DI가 include_text=False라 TEXT 요소로는 안 만든 문단이라도, 표 바로
+    근처에 있으면 그 표 요소의 metadata["nearby_paragraphs"]에 붙어야 한다
+    (청킹할 때 표만 뚝 떼서 주는 것보다 문맥이 있는 게 낫다는 요청)."""
+    graph = build_page_graph().compile()
+
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
+    vlm_table_element = DocumentElement(
+        type=ElementType.TABLE,
+        text="a table summary",
+        bboxes=[BBox(x0=10, y0=100, x1=110, y1=200)],
+        metadata={"source": "vlm", "layout_label": "table"},
+    )
+    from document_parser.parsing.loaders.pdf.azure_di import ContextParagraph
+
+    near_above = ContextParagraph(text="바로 위 문단", bboxes=[BBox(x0=10, y0=50, x1=110, y1=90)])
+    near_below = ContextParagraph(
+        text="바로 아래 문단", bboxes=[BBox(x0=10, y0=210, x1=110, y1=250)]
+    )
+    far_away = ContextParagraph(text="아주 먼 문단", bboxes=[BBox(x0=10, y0=800, x1=110, y1=850)])
+
+    with (
+        patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
+        patch("document_parser.parsing.loaders.pdf.graph.extract_native", return_value=[]),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], [], [near_above, near_below, far_away]),
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            return_value=[vlm_table_element],
+        ),
+    ):
+        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+
+    table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
+    assert len(table_elements) == 1
+    nearby = table_elements[0].metadata["nearby_paragraphs"]
+    assert nearby == ["바로 위 문단", "바로 아래 문단"]
+    assert "아주 먼 문단" not in nearby
 
 
 def _mixed_content_pdf() -> bytes:
@@ -395,7 +437,7 @@ def test_mixed_content_classified_with_real_layout_labels(engine):
     with (
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], []),
+            return_value=([], [], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -434,7 +476,7 @@ def test_scanned_page_without_text_layer_routes_to_azure_di_and_vlm(engine):
     )
     with patch(
         "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-        return_value=([fake_azure_element], []),
+        return_value=([fake_azure_element], [], []),
     ):
         document = engine.parse("scanned.pdf", data=_scanned_no_text_layer_pdf())
 
@@ -465,7 +507,7 @@ def test_multiple_figures_merge_in_reading_order_not_insertion_order(engine):
     with (
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], []),
+            return_value=([], [], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -515,7 +557,7 @@ def test_vlm_real_call(engine):
     테스트만 따로 돌아가야 하므로)."""
     with patch(
         "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-        return_value=([], []),
+        return_value=([], [], []),
     ):
         document = engine.parse("doc.pdf", data=_pdf_with_image())
 
@@ -523,3 +565,22 @@ def test_vlm_real_call(engine):
     assert len(vlm_elements) >= 1
     assert vlm_elements[0].text  # 실제 Claude Sonnet 4.6이 생성한 캡션
     assert len(vlm_elements[0].bboxes) >= 1
+
+
+def test_extract_mermaid_pulls_out_fenced_code_block():
+    from document_parser.parsing.loaders.pdf.vlm import _extract_mermaid
+
+    response = "```mermaid\ngraph TD;\nA-->B;\n```"
+    remainder, mermaid = _extract_mermaid(response)
+
+    assert mermaid == "graph TD;\nA-->B;"
+    assert remainder == "[다이어그램을 Mermaid로 추출함]"
+
+
+def test_extract_mermaid_returns_none_for_plain_caption():
+    from document_parser.parsing.loaders.pdf.vlm import _extract_mermaid
+
+    text, mermaid = _extract_mermaid("그냥 평범한 사진 설명입니다.")
+
+    assert mermaid is None
+    assert text == "그냥 평범한 사진 설명입니다."

@@ -38,6 +38,18 @@ class DetectedTable:
     bboxes: list[BBox] = field(default_factory=list)
 
 
+@dataclass
+class ContextParagraph:
+    """DI가 찾은 문단 하나 — include_text=False라 TEXT 요소로는 안 만들어도
+    (native가 이미 그 텍스트를 뽑고 있어서) 표 근처 문맥으로는 여전히 쓸모
+    있다(청킹할 때 표 하나만 뚝 떼서 주는 것보다 주변 문단이 있으면 이해하기
+    쉬움 — graph.py의 merge 노드가 표 bbox와 가까운 것들을 골라 표 요소의
+    metadata["nearby_paragraphs"]에 붙인다)."""
+
+    text: str
+    bboxes: list[BBox] = field(default_factory=list)
+
+
 @lru_cache(maxsize=1)
 def _get_client() -> AzureDocumentIntelligenceClient:
     return AzureDocumentIntelligenceClient()
@@ -45,30 +57,38 @@ def _get_client() -> AzureDocumentIntelligenceClient:
 
 def extract_with_azure_di(
     page: pymupdf.Page, page_number: int, *, include_text: bool = True
-) -> tuple[list[DocumentElement], list[DetectedTable]]:
+) -> tuple[list[DocumentElement], list[DetectedTable], list[ContextParagraph]]:
     """페이지 전체를 DI로 분석한다.
 
     include_text=False면 문단(paragraphs) 기반 TEXT 요소는 안 만든다 — 텍스트
     레이어가 있어서 native가 이미 텍스트를 뽑고 있는 페이지에서, 표 구조만
-    필요할 때 쓴다(불필요한 TEXT 중복 방지). 표(tables)는 include_text와
-    무관하게 항상 뽑는다.
+    필요할 때 쓴다(불필요한 TEXT 중복 방지). 다만 문단 자체는 include_text와
+    무관하게 항상 ContextParagraph로 반환한다 — 표 근처 문맥으로 붙일 때
+    쓴다(nearby_paragraphs). 표(tables)도 include_text와 무관하게 항상 뽑는다.
     """
     client = _get_client()
     pix = page.get_pixmap(dpi=RENDER_DPI)
     result = client.analyze_layout(pix.tobytes("png"))
 
+    context_paragraphs = [
+        ContextParagraph(
+            text=paragraph.text,
+            bboxes=[
+                BBox(x0=b[0], y0=b[1], x1=b[2], y1=b[3]) for b in map(px_to_pt, paragraph.bboxes)
+            ],
+        )
+        for paragraph in result.paragraphs
+    ]
+
     elements: list[DocumentElement] = []
     if include_text:
-        for paragraph in result.paragraphs:
-            bboxes = [
-                BBox(x0=b[0], y0=b[1], x1=b[2], y1=b[3]) for b in map(px_to_pt, paragraph.bboxes)
-            ]
+        for cp in context_paragraphs:
             elements.append(
                 DocumentElement(
                     type=ElementType.TEXT,
-                    text=paragraph.text,
+                    text=cp.text,
                     page=page_number,
-                    bboxes=bboxes,
+                    bboxes=cp.bboxes,
                     metadata={"source": "azure_di"},
                 )
             )
@@ -80,4 +100,4 @@ def extract_with_azure_di(
         )
         for table in result.tables
     ]
-    return elements, tables
+    return elements, tables, context_paragraphs

@@ -17,7 +17,11 @@ from typing import Annotated, Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from document_parser.core.models import BBox, DocumentElement, ElementType
-from document_parser.parsing.loaders.pdf.azure_di import DetectedTable, extract_with_azure_di
+from document_parser.parsing.loaders.pdf.azure_di import (
+    ContextParagraph,
+    DetectedTable,
+    extract_with_azure_di,
+)
 from document_parser.parsing.loaders.pdf.layout import PageLayout, analyze_page, route_page
 from document_parser.parsing.loaders.pdf.native import extract_native
 from document_parser.parsing.loaders.pdf.vlm import caption_figures
@@ -45,6 +49,10 @@ class PageState(TypedDict, total=False):
     # 전체에서 찾은 표(PP-DocLayoutV2 표 박스와는 독립적인 검출 결과)를
     # merge 노드가 bbox 겹침으로 매칭해서 표 요소에 붙인다.
     azure_di_tables: list[DetectedTable]
+    # include_text=False라 TEXT 요소로는 안 만든 DI 문단들 — merge 노드가 표
+    # 근처에 있는 것만 골라 그 표 요소의 metadata["nearby_paragraphs"]에 붙인다
+    # (청킹할 때 표만 뚝 떼서 주는 것보다 문맥이 있는 게 낫다는 요청).
+    azure_di_paragraphs: list[ContextParagraph]
     elements: list[DocumentElement]
 
 
@@ -65,12 +73,13 @@ def _azure_di(state: PageState) -> dict:
     # 텍스트 레이어가 있으면 native가 이미 순수 텍스트를 뽑고 있으니, DI는
     # 표 구조만 필요하다 — 문단(paragraphs) 기반 TEXT 요소는 만들지 않는다
     # (텍스트 레이어가 없는 스캔 페이지는 반대로 DI가 유일한 텍스트 출처라
-    # include_text=True).
+    # include_text=True). 문단 자체(paragraphs)는 include_text와 무관하게
+    # 항상 받아서 표 근처 문맥으로 쓴다(merge 노드 참고).
     include_text = not state["layout"].has_text_layer
-    elements, tables = extract_with_azure_di(
+    elements, tables, paragraphs = extract_with_azure_di(
         state["page"], state["page_number"], include_text=include_text
     )
-    return {"raw_elements": elements, "azure_di_tables": tables}
+    return {"raw_elements": elements, "azure_di_tables": tables, "azure_di_paragraphs": paragraphs}
 
 
 def _vlm(state: PageState) -> dict:
@@ -125,22 +134,62 @@ def _best_matching_table(element_bbox: BBox, tables: list[DetectedTable]) -> Det
     return best
 
 
-def _attach_azure_di_table_html(
-    element: DocumentElement, tables: list[DetectedTable]
+_NEARBY_PARAGRAPH_MAX_COUNT = 2
+# 이 거리(포인트) 안에 있는 문단만 "근처"로 본다 — 너무 멀리 있는 문단까지
+# 끌어오면 표랑 상관없는 내용이 섞여서 청킹 문맥으로 오히려 방해가 된다.
+_NEARBY_PARAGRAPH_MAX_DISTANCE = 60.0
+
+
+def _vertical_distance(a: BBox, b: BBox) -> float:
+    """두 bbox의 수직 거리 — 겹치면(같은 높이대에 있으면, 예: 옆 컬럼) 0."""
+    if a.y1 <= b.y0:
+        return b.y0 - a.y1
+    if b.y1 <= a.y0:
+        return a.y0 - b.y1
+    return 0.0
+
+
+def _nearby_paragraph_texts(table_bbox: BBox, paragraphs: list[ContextParagraph]) -> list[str]:
+    candidates: list[tuple[float, str]] = []
+    for paragraph in paragraphs:
+        if not paragraph.bboxes:
+            continue
+        distance = min(_vertical_distance(table_bbox, b) for b in paragraph.bboxes)
+        if distance <= _NEARBY_PARAGRAPH_MAX_DISTANCE:
+            candidates.append((distance, paragraph.text))
+    candidates.sort(key=lambda c: c[0])
+    return [text for _, text in candidates[:_NEARBY_PARAGRAPH_MAX_COUNT]]
+
+
+def _enrich_table_element(
+    element: DocumentElement,
+    tables: list[DetectedTable],
+    paragraphs: list[ContextParagraph],
 ) -> DocumentElement:
-    if element.type != ElementType.TABLE or not element.bboxes or not tables:
+    if element.type != ElementType.TABLE or not element.bboxes:
         return element
-    match = _best_matching_table(element.bboxes[0], tables)
-    if match is None:
+
+    metadata = dict(element.metadata)
+    if tables:
+        match = _best_matching_table(element.bboxes[0], tables)
+        if match is not None:
+            metadata["html"] = match.html
+    if paragraphs:
+        nearby = _nearby_paragraph_texts(element.bboxes[0], paragraphs)
+        if nearby:
+            metadata["nearby_paragraphs"] = nearby
+
+    if metadata == element.metadata:
         return element
-    return element.model_copy(update={"metadata": {**element.metadata, "html": match.html}})
+    return element.model_copy(update={"metadata": metadata})
 
 
 def _merge(state: PageState) -> dict:
     elements = sorted(state["raw_elements"], key=_merge_key)
     tables = state.get("azure_di_tables", [])
-    if tables:
-        elements = [_attach_azure_di_table_html(el, tables) for el in elements]
+    paragraphs = state.get("azure_di_paragraphs", [])
+    if tables or paragraphs:
+        elements = [_enrich_table_element(el, tables, paragraphs) for el in elements]
     return {"elements": elements}
 
 
