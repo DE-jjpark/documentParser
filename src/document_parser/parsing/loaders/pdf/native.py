@@ -23,15 +23,17 @@ if TYPE_CHECKING:
 
     from document_parser.parsing.loaders.pdf.layout import LayoutBox, PageLayout
 
-# PP-DocLayoutV2 라벨 -> ElementType. 대응하는 라벨이 없는 ElementType.LIST는
-# 의도적으로 비어 있다 — PP-DocLayoutV2 25개 카테고리에 글머리 기호 목록에
-# 해당하는 라벨이 없다(skep_parser 프로젝트의 DP-Bench 비교에서도 같은
-# 한계를 확인함). 매핑에 없는 라벨은 ElementType.TEXT로 처리한다.
+# PP-DocLayoutV2 라벨 -> ElementType. "table"이 없는 이유: 표는 layout.py의
+# _FIGURE_LABELS에 포함돼 있어서 text_boxes(이 모듈이 다루는 대상)에 아예
+# 안 들어온다 — 표는 native가 아니라 VLM/AzureDI가 처리한다(vlm.py 참고).
+# ElementType.LIST도 대응하는 라벨이 없어 의도적으로 비어 있다 — PP-DocLayoutV2
+# 25개 카테고리에 글머리 기호 목록에 해당하는 라벨이 없다(skep_parser
+# 프로젝트의 DP-Bench 비교에서도 같은 한계를 확인함). 매핑에 없는 라벨은
+# ElementType.TEXT로 처리한다.
 _LABEL_TO_TYPE = {
     "doc_title": ElementType.HEADING,
     "paragraph_title": ElementType.HEADING,
     "figure_title": ElementType.HEADING,
-    "table": ElementType.TABLE,
 }
 
 

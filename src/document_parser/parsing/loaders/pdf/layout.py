@@ -62,9 +62,13 @@ ALL_LABELS = (
     "vision_footnote",
 )
 
-# 25개 중 "텍스트로 바로 추출하기 어려운 그림류" — has_figures 판정과 VLM
-# 크롭 대상 결정에 쓴다(skep_parser 프로젝트의 DP-Bench 비교에서 쓴 것과
-# 동일한 분류).
+# 25개 중 "순수 텍스트 추출(pymupdf)만으로는 부족한" 카테고리 — has_figures
+# 판정과 VLM/AzureDI 크롭 대상 결정에 쓴다. 원래는 그림류만 포함했는데(그림은
+# pymupdf로 텍스트를 뽑을 수 없으니 당연), "표는 plumber(pymupdf) 텍스트
+# 추출이 아니라 VLM/DI로 보내기로 했다"는 설계 결정에 따라 table도 여기
+# 포함시켰다 — 표는 pymupdf로 글자는 뽑을 수 있어도 행/열/병합 구조를 못
+# 뽑아서(TEDS/TEDS-S가 그 구조를 보는 지표라 점수가 안 나옴) 그림과 같은
+# 취급으로 바꿨다.
 _FIGURE_LABELS = {
     "chart",
     "image",
@@ -74,6 +78,7 @@ _FIGURE_LABELS = {
     "display_formula",
     "inline_formula",
     "formula_number",
+    "table",
 }
 
 
@@ -112,13 +117,14 @@ class PageLayout:
 
     @property
     def crop_boxes(self) -> list[LayoutBox]:
-        """그림류(_FIGURE_LABELS)만 골라낸 것 — VLM 크롭 대상. boxes가 이미
-        읽기 순서로 정렬돼 있어 그림이 여러 개여도 순서가 유지된다."""
+        """그림류+표(_FIGURE_LABELS)만 골라낸 것 — VLM/AzureDI 크롭 대상.
+        boxes가 이미 읽기 순서로 정렬돼 있어 여러 개여도 순서가 유지된다."""
         return [b for b in self.boxes if b.label in _FIGURE_LABELS]
 
     @property
     def text_boxes(self) -> list[LayoutBox]:
-        """그림류를 뺀 나머지(제목·본문·표 등) — 네이티브 텍스트 추출 대상."""
+        """순수 텍스트류(제목·본문·목록 등, 표 제외)만 — 네이티브 텍스트
+        추출 대상."""
         return [b for b in self.boxes if b.label not in _FIGURE_LABELS]
 
 
@@ -205,9 +211,11 @@ def route_page(layout: PageLayout) -> str:
     있었다):
 
     - 텍스트 레이어가 없음(스캔 문서) → 원본 텍스트를 읽을 방법이 없으니
-      AzureDI(페이지 전체) + VLM(그림 있으면 캡션)
-    - 텍스트 레이어는 있는데 그림도 있음 → 텍스트는 native로 정확하게 뽑고
-      그림만 VLM으로 캡션 (AzureDI 불필요)
+      AzureDI(페이지 전체) + VLM(그림·표 있으면 캡션/HTML 추출)
+    - 텍스트 레이어는 있는데 그림·표도 있음 → 순수 텍스트는 native로 정확하게
+      뽑고 그림·표만 VLM으로 처리 (AzureDI 불필요) — has_figures는 표 포함
+      기준이라(_FIGURE_LABELS 참고), 표만 있고 다른 그림이 없는 페이지도
+      여기로 온다.
     - 텍스트만 있고 텍스트 레이어도 있음 → native만
 
     반환값: "native" | "native_and_vlm" | "azure_di_and_vlm"
