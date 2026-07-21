@@ -73,7 +73,8 @@ class _DOMWalker(HTMLParser):
             self._table_rows = []
 
 
-def load(data: bytes, source: str) -> list[DocumentElement]:
+def load(data: bytes, source: str, tier: str = "balanced") -> list[DocumentElement]:
+    # tier 무시 -- html은 애초에 AzureDI/VLM을 안 쓴다.
     html_text = data.decode("utf-8", errors="replace")
     walker = _DOMWalker()
     walker.feed(html_text)

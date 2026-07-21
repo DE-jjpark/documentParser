@@ -12,3 +12,4 @@ wheels/
 # 로컬 자격증명(커밋 금지)
 .env
 .env.*
+!.env.example

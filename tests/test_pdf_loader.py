@@ -17,7 +17,8 @@ layout.analyze_page()는 실제로(설치된 것 기준: 'layout' extra + 가중
 """
 
 import os
-from unittest.mock import patch
+from io import BytesIO
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -166,6 +167,37 @@ def test_route_page_routing_rule():
     )
 
 
+def test_route_page_fast_tier_forces_native_regardless_of_content():
+    """tier="fast"면 표/그림이 있든, 텍스트 레이어가 아예 없든(스캔) 무조건
+    native만 -- AzureDI/VLM 호출 자체를 하지 않는다는 게 핵심."""
+    for layout in (
+        PageLayout(has_figures=True, has_text_layer=True, has_table=True),
+        PageLayout(has_figures=True, has_text_layer=False, has_table=True),
+        PageLayout(has_figures=False, has_text_layer=False, has_table=False),
+    ):
+        assert route_page(layout, tier="fast") == "native"
+
+
+def test_fast_tier_skips_azure_di_and_vlm_even_with_table_and_image(engine):
+    """엔진 레벨에서: 표+이미지 다 있는 페이지도 tier="fast"면 AzureDI/VLM
+    둘 다 아예 호출되지 않아야 한다."""
+    with (
+        patch("document_parser.parsing.loaders.pdf.graph.extract_with_azure_di") as mock_azure,
+        patch("document_parser.parsing.loaders.pdf.graph.caption_figures") as mock_vlm,
+    ):
+        document = engine.parse("doc.pdf", data=_pdf_with_image(), tier="fast")
+
+    mock_azure.assert_not_called()
+    mock_vlm.assert_not_called()
+    sources = {el.metadata.get("source") for el in document.elements}
+    assert sources == {"native"}
+
+
+def test_invalid_tier_raises_value_error(engine):
+    with pytest.raises(ValueError):
+        engine.parse("doc.pdf", data=_text_only_pdf(), tier="ultra")
+
+
 def test_page_graph_runs_native_and_azure_di_and_vlm_in_parallel():
     """텍스트 레이어 있음 + 표 있음 케이스에서 native/azure_di/vlm 셋 다
     실제로 같은 super-step에서 병렬 실행되는지 확인 — layout을 직접 만들어
@@ -182,14 +214,16 @@ def test_page_graph_runs_native_and_azure_di_and_vlm_in_parallel():
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], []),
+            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], [], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
             return_value=[DocumentElement(text="v", metadata={"source": "vlm"})],
         ),
     ):
-        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+        result = graph.invoke(
+            {"page": None, "plumber_page": None, "page_number": 1, "raw_elements": []}
+        )
 
     sources = {el.metadata["source"] for el in result["elements"]}
     assert sources == {"native", "azure_di", "vlm"}
@@ -206,7 +240,7 @@ def test_page_graph_runs_azure_di_and_vlm_in_parallel():
         patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], []),
+            return_value=([DocumentElement(text="a", metadata={"source": "azure_di"})], [], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -221,17 +255,20 @@ def test_page_graph_runs_azure_di_and_vlm_in_parallel():
 
 def test_merge_attaches_azure_di_table_html_to_matching_vlm_table_element():
     """DI가 찾은 표(bbox+html)와 VLM이 캡션한 표 박스(같은 위치)가 겹치면,
-    최종 표 요소의 metadata["html"]에 DI 구조가 채워져야 한다 — PaddleX
+    최종 표 요소의 metadata["html"]에 DI 구조가 채워지고 .text도 그 구조에서
+    뽑은 마크다운으로 덮어써야 한다(VLM 자체 마크다운보다 정확하므로) — PaddleX
     표 박스와 DI 표 검출은 서로 다른 결과라 id가 없으므로 bbox 겹침으로
-    매칭한다(graph.py의 _best_matching_table)."""
+    매칭한다(graph.py의 _best_matching_table). .summary(VLM 요약)는 그대로
+    유지돼야 한다."""
     graph = build_page_graph().compile()
 
     fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
     vlm_table_element = DocumentElement(
         type=ElementType.TABLE,
-        text="a table summary",
+        text="| 1 |\n| --- |",  # VLM 자체 마크다운(폴백) — DI 매칭되면 덮어써져야 함
+        summary="a table summary",
         bboxes=[BBox(x0=10, y0=10, x1=110, y1=60)],
-        metadata={"source": "vlm", "layout_label": "table"},
+        metadata={"source": "vlm", "block_type": "table"},
     )
     from document_parser.parsing.loaders.pdf.azure_di import DetectedTable
 
@@ -248,19 +285,22 @@ def test_merge_attaches_azure_di_table_html_to_matching_vlm_table_element():
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], [matching_table]),
+            return_value=([], [matching_table], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
             return_value=[vlm_table_element],
         ),
     ):
-        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+        result = graph.invoke(
+            {"page": None, "plumber_page": None, "page_number": 1, "raw_elements": []}
+        )
 
     table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
     assert len(table_elements) == 1
     assert table_elements[0].metadata["html"] == "<table><tr><td>1</td></tr></table>"
-    assert table_elements[0].text == "a table summary"  # VLM 요약은 그대로 유지
+    assert table_elements[0].text == "| 1 |\n| --- |"  # DI 구조에서 뽑은 마크다운으로 덮어씀
+    assert table_elements[0].summary == "a table summary"  # VLM 요약은 그대로 유지
 
 
 def test_merge_leaves_table_without_matching_di_table_unchanged():
@@ -273,7 +313,7 @@ def test_merge_leaves_table_without_matching_di_table_unchanged():
         type=ElementType.TABLE,
         text="a table summary",
         bboxes=[BBox(x0=10, y0=10, x1=110, y1=60)],
-        metadata={"source": "vlm", "layout_label": "table"},
+        metadata={"source": "vlm", "block_type": "table"},
     )
     from document_parser.parsing.loaders.pdf.azure_di import DetectedTable
 
@@ -290,19 +330,121 @@ def test_merge_leaves_table_without_matching_di_table_unchanged():
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], [unrelated_table]),
+            return_value=([], [unrelated_table], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
             return_value=[vlm_table_element],
         ),
     ):
-        result = graph.invoke({"page": None, "page_number": 1, "raw_elements": []})
+        result = graph.invoke(
+            {"page": None, "plumber_page": None, "page_number": 1, "raw_elements": []}
+        )
 
     table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
     assert len(table_elements) == 1
     assert "html" not in table_elements[0].metadata
     assert table_elements[0].text == "a table summary"
+
+
+def test_merge_recovers_misclassified_table_using_native_text():
+    """PP-DocLayoutV2가 "table"이라고 했는데 AzureDI가 그 자리에서 실제 표
+    구조를 못 찾았고, 그 영역에 native로 뽑을 수 있는 텍스트가 꽤 있으면
+    (표가 아니라 일반 텍스트를 표로 오분류한 것으로 보고) type을 TABLE에서
+    TEXT로 되돌리고 원문을 text로 써야 한다 — 실측으로 발견한 문제(페이지
+    전체가 표로 오분류돼서 본문이 VLM 요약으로 통째로 대체되며 유실된 것)의
+    회귀 테스트."""
+    pdfplumber = pytest.importorskip("pdfplumber", reason="pdf extra not installed")
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    # pymupdf 기본 폰트가 한글 글리프를 지원 안 해서(찍히면 전부 '·'로 나옴)
+    # 영어로 씀 — 여기서 검증하려는 건 어차피 언어가 아니라 "native로 뽑을
+    # 수 있는 텍스트 분량"이라 무관하다.
+    long_text = "This clause is actually plain numbered text, not a table. " * 3
+    page.insert_text((72, 72), long_text, fontsize=10)
+    # 실제 복구 로직은 pdfplumber로 텍스트를 뽑으므로, 같은 PDF 바이트를
+    # pdfplumber로도 열어서 진짜 plumber_page를 넘겨야 회귀 테스트가 유효하다.
+    pdoc = pdfplumber.open(BytesIO(doc.tobytes()))
+    plumber_page = pdoc.pages[0]
+
+    graph = build_page_graph().compile()
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
+    misclassified_element = DocumentElement(
+        type=ElementType.TABLE,
+        text="[VLM이 이 영역을 표로 착각하고 만든 요약/마크다운 시도]",
+        summary="표로 착각한 요약",
+        bboxes=[BBox(x0=0, y0=0, x1=595, y1=200)],
+        metadata={"source": "vlm", "block_type": "table"},
+    )
+
+    with (
+        patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
+        patch("document_parser.parsing.loaders.pdf.graph.extract_native", return_value=[]),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], [], []),  # DI가 표를 하나도 못 찾음
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            return_value=[misclassified_element],
+        ),
+    ):
+        result = graph.invoke(
+            {"page": page, "plumber_page": plumber_page, "page_number": 1, "raw_elements": []}
+        )
+
+    elements = result["elements"]
+    assert len(elements) == 1
+    assert elements[0].type == ElementType.TEXT
+    assert "plain numbered text" in elements[0].text
+    assert elements[0].metadata.get("misclassified_as_table") is True
+    pdoc.close()
+    doc.close()
+
+
+def test_merge_attaches_nearby_paragraphs_to_table_element():
+    """DI가 include_text=False라 TEXT 요소로는 안 만든 문단이라도, 표 바로
+    근처에 있으면 그 표 요소의 metadata["nearby_paragraphs"]에 붙어야 한다
+    (청킹할 때 표만 뚝 떼서 주는 것보다 문맥이 있는 게 낫다는 요청)."""
+    graph = build_page_graph().compile()
+
+    fake_layout = PageLayout(has_figures=True, has_text_layer=True, has_table=True, boxes=[])
+    vlm_table_element = DocumentElement(
+        type=ElementType.TABLE,
+        text="a table summary",
+        bboxes=[BBox(x0=10, y0=100, x1=110, y1=200)],
+        metadata={"source": "vlm", "block_type": "table"},
+    )
+    from document_parser.parsing.loaders.pdf.azure_di import ContextParagraph
+
+    near_above = ContextParagraph(text="바로 위 문단", bboxes=[BBox(x0=10, y0=50, x1=110, y1=90)])
+    near_below = ContextParagraph(
+        text="바로 아래 문단", bboxes=[BBox(x0=10, y0=210, x1=110, y1=250)]
+    )
+    far_away = ContextParagraph(text="아주 먼 문단", bboxes=[BBox(x0=10, y0=800, x1=110, y1=850)])
+
+    with (
+        patch("document_parser.parsing.loaders.pdf.graph.analyze_page", return_value=fake_layout),
+        patch("document_parser.parsing.loaders.pdf.graph.extract_native", return_value=[]),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
+            return_value=([], [], [near_above, near_below, far_away]),
+        ),
+        patch(
+            "document_parser.parsing.loaders.pdf.graph.caption_figures",
+            return_value=[vlm_table_element],
+        ),
+    ):
+        result = graph.invoke(
+            {"page": None, "plumber_page": None, "page_number": 1, "raw_elements": []}
+        )
+
+    table_elements = [el for el in result["elements"] if el.type == ElementType.TABLE]
+    assert len(table_elements) == 1
+    nearby = table_elements[0].metadata["nearby_paragraphs"]
+    assert nearby == ["바로 위 문단", "바로 아래 문단"]
+    assert "아주 먼 문단" not in nearby
 
 
 def _mixed_content_pdf() -> bytes:
@@ -368,12 +510,28 @@ def _multi_figure_pdf() -> bytes:
 
 
 @requires_real_layout_model
-def test_mixed_content_classified_with_real_layout_labels(engine):
+def test_mixed_content_classified_with_real_block_types(engine):
     """제목/본문/표가 섞인 페이지에서 25개 카테고리 중 실제 라벨(paragraph_title/
     text/table)이 최종 출력까지 그대로 이어지는지, 그리고 위→아래 읽기
     순서로 나오는지 확인한다. 표는 이제 azure_di+vlm 경로를 타므로(native가
     아니라) 이 둘은 mock — 이 테스트의 목적은 레이아웃 모델의 실제 라벨/순서
-    분류이지 azure_di/vlm 라이브 호출 자체가 아니다."""
+    분류이지 azure_di/vlm 라이브 호출 자체가 아니다.
+
+    azure_di mock이 이 표 위치와 겹치는 DetectedTable을 돌려주게 해야 한다 —
+    안 그러면 "표로 오분류된 일반 텍스트" 복구 로직(graph.py의
+    _enrich_table_element, 실측으로 표 전체가 표로 오분류돼 본문이 유실된
+    문제를 고치려고 추가함)이 이 그리드 표(실제 텍스트가 있음)까지
+    TEXT로 되돌려버려서, 이 테스트가 원래 확인하려던 "표 라벨이 끝까지
+    유지되는지"를 볼 수 없게 된다."""
+    from document_parser.parsing.loaders.pdf.azure_di import DetectedTable
+
+    # _mixed_content_pdf()가 그리는 실제 표 좌표(x0,y0,x1,y1 = 72,160,500,260)와
+    # 겹치는 가짜 DetectedTable — PP-DocLayoutV2가 찾은 실제 표 박스와 거의
+    # 같은 위치라 IoU 매칭이 성공한다.
+    fake_table = DetectedTable(
+        html="<table><tr><td>R0C0</td></tr></table>",
+        bboxes=[BBox(x0=72, y0=160, x1=500, y1=260)],
+    )
 
     def fake_caption_figures(page, page_number, boxes):
         return [
@@ -384,7 +542,7 @@ def test_mixed_content_classified_with_real_layout_labels(engine):
                 bboxes=[BBox(x0=b.bbox[0], y0=b.bbox[1], x1=b.bbox[2], y1=b.bbox[3])],
                 metadata={
                     "source": "vlm",
-                    "layout_label": b.label,
+                    "block_type": b.label,
                     "layout_cls_id": b.cls_id,
                     "layout_box_index": b.box_index,
                 },
@@ -395,7 +553,7 @@ def test_mixed_content_classified_with_real_layout_labels(engine):
     with (
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], []),
+            return_value=([], [fake_table], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -404,7 +562,7 @@ def test_mixed_content_classified_with_real_layout_labels(engine):
     ):
         document = engine.parse("mixed.pdf", data=_mixed_content_pdf())
 
-    labels = [el.metadata.get("layout_label") for el in document.elements]
+    labels = [el.metadata.get("block_type") for el in document.elements]
     types = [el.type for el in document.elements]
 
     assert "paragraph_title" in labels
@@ -434,7 +592,7 @@ def test_scanned_page_without_text_layer_routes_to_azure_di_and_vlm(engine):
     )
     with patch(
         "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-        return_value=([fake_azure_element], []),
+        return_value=([fake_azure_element], [], []),
     ):
         document = engine.parse("scanned.pdf", data=_scanned_no_text_layer_pdf())
 
@@ -457,7 +615,7 @@ def test_multiple_figures_merge_in_reading_order_not_insertion_order(engine):
                 text="a caption",
                 page=page_number,
                 bboxes=[BBox(x0=b.bbox[0], y0=b.bbox[1], x1=b.bbox[2], y1=b.bbox[3])],
-                metadata={"source": "vlm", "layout_label": b.label},
+                metadata={"source": "vlm", "block_type": b.label},
             )
             for b in boxes
         ]
@@ -465,7 +623,7 @@ def test_multiple_figures_merge_in_reading_order_not_insertion_order(engine):
     with (
         patch(
             "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-            return_value=([], []),
+            return_value=([], [], []),
         ),
         patch(
             "document_parser.parsing.loaders.pdf.graph.caption_figures",
@@ -515,7 +673,7 @@ def test_vlm_real_call(engine):
     테스트만 따로 돌아가야 하므로)."""
     with patch(
         "document_parser.parsing.loaders.pdf.graph.extract_with_azure_di",
-        return_value=([], []),
+        return_value=([], [], []),
     ):
         document = engine.parse("doc.pdf", data=_pdf_with_image())
 
@@ -523,3 +681,57 @@ def test_vlm_real_call(engine):
     assert len(vlm_elements) >= 1
     assert vlm_elements[0].text  # 실제 Claude Sonnet 4.6이 생성한 캡션
     assert len(vlm_elements[0].bboxes) >= 1
+
+
+def test_extract_mermaid_pulls_out_fenced_code_block():
+    """content 자체가 mermaid 소스가 돼야 한다(요청: "text: ... mermaid 반환") —
+    두 반환값(text로 쓸 것, metadata용) 다 mermaid 소스 그 자체."""
+    from document_parser.parsing.loaders.vlm_caption import extract_mermaid as _extract_mermaid
+
+    response = "```mermaid\ngraph TD;\nA-->B;\n```"
+    text, mermaid = _extract_mermaid(response)
+
+    assert mermaid == "graph TD;\nA-->B;"
+    assert text == "graph TD;\nA-->B;"
+
+
+def test_extract_mermaid_returns_none_for_plain_caption():
+    from document_parser.parsing.loaders.vlm_caption import extract_mermaid as _extract_mermaid
+
+    text, mermaid = _extract_mermaid("그냥 평범한 사진 설명입니다.")
+
+    assert mermaid is None
+    assert text == "그냥 평범한 사진 설명입니다."
+
+
+def test_caption_figures_extracts_latex_for_formula_labels(monkeypatch):
+    """display_formula/inline_formula/formula_number 라벨이면 표/일반
+    이미지와 다른 프롬프트(LaTeX 요청)를 타고, text가 LaTeX 소스 그 자체가
+    되면서 metadata["latex"]에도 같은 값이 남는지(mermaid와 동일 패턴)."""
+    from document_parser.parsing.clients.vlm import VLMCaptionResult
+    from document_parser.parsing.loaders.pdf.layout import LayoutBox
+    from document_parser.parsing.loaders.pdf.vlm import caption_figures
+
+    fake_client = MagicMock()
+    fake_client.caption_image.return_value = VLMCaptionResult(
+        text="[CONTENT]\nE = mc^2\n[SUMMARY]\n질량-에너지 등가 공식.",
+        usage=None,
+    )
+    monkeypatch.setattr("document_parser.parsing.loaders.pdf.vlm.get_client", lambda: fake_client)
+
+    fake_pix = MagicMock()
+    fake_pix.tobytes.return_value = b"fake-png-bytes"
+    fake_page = MagicMock()
+    fake_page.get_pixmap.return_value = fake_pix
+
+    box = LayoutBox(label="display_formula", bbox=(0.0, 0.0, 10.0, 10.0))
+
+    elements = caption_figures(fake_page, 1, [box])
+
+    assert len(elements) == 1
+    element = elements[0]
+    assert element.type == ElementType.IMAGE
+    assert element.text == "E = mc^2"
+    assert element.summary == "질량-에너지 등가 공식."
+    assert element.metadata["latex"] == "E = mc^2"
+    assert element.metadata["block_type"] == "display_formula"

@@ -4,7 +4,13 @@ import argparse
 import json
 import sys
 
-from document_parser import ChunkingConfig, DocumentParserError, IngestPipeline, __version__
+from document_parser import (
+    ChunkingConfig,
+    DocumentParserError,
+    IngestPipeline,
+    ParsingTier,
+    __version__,
+)
 from document_parser.parsing.weights import LAYOUT_MODEL_REPO, download_layout_model
 
 
@@ -23,12 +29,26 @@ def build_parser() -> argparse.ArgumentParser:
     parse_cmd = subparsers.add_parser("parse", help="parse a document and print it as JSON")
     parse_cmd.add_argument("file", help="path to the document")
     parse_cmd.add_argument("--format", help="override format detection (e.g. txt, md, pdf)")
+    parse_cmd.add_argument(
+        "--tier",
+        choices=[t.value for t in ParsingTier],
+        default=ParsingTier.BALANCED.value,
+        help="'fast' = native/plumber only, no AzureDI/VLM calls; "
+        "'balanced' = full pipeline (default)",
+    )
 
     ingest_cmd = subparsers.add_parser(
         "ingest", help="parse and chunk a document, print chunks as JSON"
     )
     ingest_cmd.add_argument("file", help="path to the document")
     ingest_cmd.add_argument("--format", help="override format detection")
+    ingest_cmd.add_argument(
+        "--tier",
+        choices=[t.value for t in ParsingTier],
+        default=ParsingTier.BALANCED.value,
+        help="'fast' = native/plumber only, no AzureDI/VLM calls; "
+        "'balanced' = full pipeline (default)",
+    )
     ingest_cmd.add_argument("--strategy", default="recursive")
     ingest_cmd.add_argument("--chunk-size", type=int, default=1000)
     ingest_cmd.add_argument("--chunk-overlap", type=int, default=200)
@@ -61,7 +81,7 @@ def main() -> None:
 
     try:
         if args.command == "parse":
-            document = IngestPipeline().parsing.parse(args.file, format=args.format)
+            document = IngestPipeline().parsing.parse(args.file, format=args.format, tier=args.tier)
             print(document.model_dump_json(indent=2))
         elif args.command == "ingest":
             config = ChunkingConfig(
@@ -69,7 +89,9 @@ def main() -> None:
                 chunk_size=args.chunk_size,
                 chunk_overlap=args.chunk_overlap,
             )
-            chunks = IngestPipeline().ingest(args.file, format=args.format, config=config)
+            chunks = IngestPipeline().ingest(
+                args.file, format=args.format, tier=args.tier, config=config
+            )
             print(json.dumps([chunk.model_dump() for chunk in chunks], indent=2))
         elif args.command == "download-models":
             kwargs = {"revision": args.revision} if args.revision else {}

@@ -19,6 +19,7 @@ def test_public_api_surface():
         "ParsedDocument",
         "ParsingEngine",
         "ParsingFailedError",
+        "ParsingTier",
         "Segment",
         "UnsupportedFormatError",
         "__version__",

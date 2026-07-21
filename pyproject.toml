@@ -10,7 +10,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-pdf = ["pymupdf>=1.24"]
+pdf = [
+    "pdfplumber>=0.11.10",
+    "pymupdf>=1.24",
+]
 # NOTE: 'layout' does not fully install PP-DocLayoutV2 -- paddlepaddle itself is
 # not on this list because it isn't published to a normal PyPI index. Install
 # it separately from PaddlePaddle's own index (supply-chain review pending,

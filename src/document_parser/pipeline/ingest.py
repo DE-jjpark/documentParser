@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from document_parser.chunking import ChunkingEngine
-from document_parser.core.models import Chunk, ChunkingConfig, ParsedDocument, Segment
+from document_parser.core.models import Chunk, ChunkingConfig, ParsedDocument, ParsingTier, Segment
 from document_parser.parsing import ParsingEngine
 
 
@@ -40,9 +40,10 @@ class IngestPipeline:
         *,
         data: bytes | None = None,
         format: str | None = None,
+        tier: str | ParsingTier = ParsingTier.BALANCED,
         config: ChunkingConfig | None = None,
     ) -> list[Chunk]:
-        document = await self.parsing.aparse(source, data=data, format=format)
+        document = await self.parsing.aparse(source, data=data, format=format, tier=tier)
         return await self.chunking.achunk(document_to_segments(document), config)
 
     def ingest(
@@ -51,7 +52,8 @@ class IngestPipeline:
         *,
         data: bytes | None = None,
         format: str | None = None,
+        tier: str | ParsingTier = ParsingTier.BALANCED,
         config: ChunkingConfig | None = None,
     ) -> list[Chunk]:
-        document = self.parsing.parse(source, data=data, format=format)
+        document = self.parsing.parse(source, data=data, format=format, tier=tier)
         return self.chunking.chunk(document_to_segments(document), config)
