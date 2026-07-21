@@ -39,6 +39,7 @@ _ROUTE_TARGETS: dict[str, str | list[str]] = {
 class PageState(TypedDict, total=False):
     page: Any  # pymupdf.Page — 그래프 상태 스키마 자체엔 pymupdf 타입을 안 써서
     #             'pdf' extra 없이도 이 모듈을 import할 수 있게 한다.
+    tier: str  # "fast" | "balanced" — pdf/__init__.py의 load()가 페이지마다 그대로 넘긴다.
     # pdfplumber.Page — native(순수 텍스트) 추출은 이걸로 한다(요청:
     # "plumber 사용할거고 native일 때 사용하도록"). pymupdf page와 좌표계가
     # 같아서(포인트, 좌상단 원점) 같은 bbox를 그대로 재사용한다.
@@ -66,7 +67,7 @@ def _analyze(state: PageState) -> dict:
 
 
 def _route(state: PageState) -> str | list[str]:
-    return _ROUTE_TARGETS[route_page(state["layout"])]
+    return _ROUTE_TARGETS[route_page(state["layout"], state.get("tier", "balanced"))]
 
 
 def _native(state: PageState) -> dict:

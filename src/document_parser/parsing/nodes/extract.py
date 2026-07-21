@@ -1,4 +1,5 @@
 from document_parser.core.exceptions import UnsupportedFormatError
+from document_parser.core.models import ParsingTier
 from document_parser.parsing.loaders import get_loader, supported_formats
 from document_parser.parsing.state import ParsingState
 
@@ -11,4 +12,5 @@ def extract(state: ParsingState) -> dict:
         raise UnsupportedFormatError(
             f"unsupported format {fmt!r}; supported: {', '.join(supported_formats())}"
         )
-    return {"elements": loader(state["data"], state["source"])}
+    tier = state.get("tier", ParsingTier.BALANCED.value)
+    return {"elements": loader(state["data"], state["source"], tier)}

@@ -31,13 +31,13 @@ def test_parse_markdown_headings(engine):
     assert document.elements[0].metadata["level"] == 1
 
 
-def test_elements_get_sequential_elem_ids(engine):
-    """assemble()이 붙이는 elem_id는 "e{n}" 형태 — 페이지/타입 구분 없이
+def test_elements_get_sequential_block_ids(engine):
+    """assemble()이 붙이는 block_id는 "e{n}" 형태 — 페이지/타입 구분 없이
     elements 순서(=읽기 순서) 그대로 문서 전체에 전역 일련번호를 매긴다."""
     data = b"# Title\n\nfirst paragraph\n\n## Section\n\nsecond paragraph"
     document = engine.parse("doc.md", data=data)
-    elem_ids = [el.elem_id for el in document.elements]
-    assert elem_ids == ["e1", "e2", "e3", "e4"]
+    block_ids = [el.block_id for el in document.elements]
+    assert block_ids == ["e1", "e2", "e3", "e4"]
 
 
 def test_parse_bytes_with_explicit_format(engine):

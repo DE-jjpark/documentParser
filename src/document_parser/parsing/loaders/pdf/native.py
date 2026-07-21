@@ -2,7 +2,7 @@
 
 레이아웃 분석(layout.py)이 실제 PP-DocLayoutV2 결과(``layout.boxes``)를 줬으면
 그 영역별로 텍스트를 뽑아 25개 카테고리 중 실제 감지된 라벨을 그대로
-``metadata["layout_label"]``에 남긴다.
+``metadata["block_type"]``에 남긴다.
 
 pymupdf가 아니라 pdfplumber를 쓰는 이유: 요청("plumber 사용할거고 native일
 때 사용하도록")에 따른 것 — 페이지 렌더링(레이아웃 모델 입력, AzureDI/VLM
@@ -87,7 +87,7 @@ def _extract_from_boxes(
                 bboxes=[BBox(x0=x0, y0=y0, x1=x1, y1=y1)],
                 metadata={
                     "source": "native",
-                    "layout_label": box.label,
+                    "block_type": box.label,
                     "layout_cls_id": box.cls_id,
                     "layout_box_index": box.box_index,
                 },

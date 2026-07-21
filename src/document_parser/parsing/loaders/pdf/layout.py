@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 # PP-DocLayoutV2 전체 25개 카테고리 (~/.paddlex/official_models/PP-DocLayoutV2/
 # inference.yml 기준). 실제 감지된 라벨은 LayoutBox.label에 그대로 담겨
-# DocumentElement.metadata["layout_label"]까지 이어진다(vlm.py 참고) —
+# DocumentElement.metadata["block_type"]까지 이어진다(vlm.py 참고) —
 # has_figures 판정에만 쓰고 버리지 않도록 여기 전체 카탈로그를 보관해둔다.
 ALL_LABELS = (
     "abstract",
@@ -210,9 +210,11 @@ def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLay
     )
 
 
-def route_page(layout: PageLayout) -> str:
-    """페이지 라우팅 규칙 — 4분기.
+def route_page(layout: PageLayout, tier: str = "balanced") -> str:
+    """페이지 라우팅 규칙 — 4분기(tier="fast"면 무조건 native).
 
+    - tier="fast" → 무조건 native만. AzureDI/VLM 호출 자체를 안 한다 —
+      텍스트 레이어 없는(스캔) 페이지는 뽑을 방법이 없어 그대로 유실됨(감수).
     - 텍스트 레이어가 있고 그림·표가 없음(순수 텍스트) → native만.
     - 텍스트 레이어가 있고 표가 있음 → 순수 텍스트는 native가 이미 정확하게
       뽑으니 그대로 두고, AzureDI는 "표 구조(HTML)만" 뽑는 용도로만 페이지
@@ -232,6 +234,8 @@ def route_page(layout: PageLayout) -> str:
     반환값: "native" | "native_and_azure_di_and_vlm" | "native_and_vlm" |
     "azure_di_and_vlm"
     """
+    if tier == "fast":
+        return "native"
     if not layout.has_text_layer:
         return "azure_di_and_vlm"
     if layout.has_table:

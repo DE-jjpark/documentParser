@@ -26,7 +26,7 @@ def _get_page_graph():
     return build_page_graph().compile()
 
 
-def load(data: bytes, source: str) -> list[DocumentElement]:
+def load(data: bytes, source: str, tier: str = "balanced") -> list[DocumentElement]:
     try:
         import pymupdf
     except ImportError as exc:
@@ -52,6 +52,7 @@ def load(data: bytes, source: str) -> list[DocumentElement]:
                     "plumber_page": plumber_page,
                     "page_number": page_number,
                     "raw_elements": [],
+                    "tier": tier,
                 }
             )
             elements.extend(result["elements"])

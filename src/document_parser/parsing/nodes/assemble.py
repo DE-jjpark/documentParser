@@ -6,7 +6,7 @@ def assemble(state: ParsingState) -> dict:
     """Build the ParsedDocument contract object from the extracted elements."""
     elements = state.get("elements", [])
     keyed_elements = [
-        el.model_copy(update={"elem_id": f"e{i}"}) for i, el in enumerate(elements, start=1)
+        el.model_copy(update={"block_id": f"e{i}"}) for i, el in enumerate(elements, start=1)
     ]
     document = ParsedDocument(
         source=state["source"],

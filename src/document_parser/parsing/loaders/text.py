@@ -9,7 +9,8 @@ FORMATS = ("txt", "text", "md", "markdown")
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 
 
-def load(data: bytes, source: str) -> list[DocumentElement]:
+def load(data: bytes, source: str, tier: str = "balanced") -> list[DocumentElement]:
+    # tier 무시 -- txt/md는 애초에 AzureDI/VLM을 안 쓴다.
     text = data.decode("utf-8", errors="replace")
     elements: list[DocumentElement] = []
     for block in re.split(r"\n\s*\n", text):

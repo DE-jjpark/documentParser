@@ -19,6 +19,7 @@ from document_parser.core.models import (
     DocumentElement,
     ElementType,
     ParsedDocument,
+    ParsingTier,
     Segment,
 )
 from document_parser.parsing import ParsingEngine
@@ -40,6 +41,7 @@ __all__ = [
     "ParsedDocument",
     "ParsingEngine",
     "ParsingFailedError",
+    "ParsingTier",
     "Segment",
     "UnsupportedFormatError",
     "__version__",

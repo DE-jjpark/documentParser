@@ -16,6 +16,25 @@ class ElementType(StrEnum):
     LIST = "list"
     TABLE = "table"
     IMAGE = "image"
+    # 슬라이드 노트(pptx/ppt)·문서 댓글(docx) 등, 본문이 아니라 본문에 "붙은" 메모.
+    # office.py가 PDF 변환과 별도로 원본 zip에서 직접 뽑아 채운다 — PDF 변환
+    # 과정에서 이런 메모는 사라지기 때문(LibreOffice 기본 변환 필터가 노트
+    # 페이지/댓글을 export하지 않음, 실측으로 확인함).
+    NOTE = "note"
+
+
+class ParsingTier(StrEnum):
+    """엔진 호출자가 고르는 속도/비용 대 품질 트레이드오프.
+
+    - FAST: native(pdfplumber)만 쓴다 — AzureDI/VLM 호출 자체를 안 한다.
+      텍스트 레이어 없는(스캔) 페이지는 뽑을 방법이 없어 그대로 유실된다 —
+      "빠르고 무료"의 대가로 감수하는 것.
+    - BALANCED: 지금까지의 기본 파이프라인 그대로(표/그림 있으면 AzureDI·
+      VLM까지 태움).
+    """
+
+    FAST = "fast"
+    BALANCED = "balanced"
 
 
 class BBox(BaseModel):
@@ -44,7 +63,7 @@ class DocumentElement(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     # "e{n}" (1부터) — assemble 노드가 elements 순서(=읽기 순서) 그대로 문서
     # 전체에 매기는 전역 일련번호. 페이지/타입 무관.
-    elem_id: str | None = None
+    block_id: str | None = None
     # TABLE/IMAGE 전용 — 원본 "내용"(text: 표는 마크다운, 이미지는 설명/전사/
     # Mermaid)과 별도로, VLM이 만든 요약을 따로 둔다. 순수 텍스트류(TEXT/
     # HEADING/LIST)는 요약이라는 개념 자체가 없어서 항상 None.
