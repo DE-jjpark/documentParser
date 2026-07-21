@@ -443,16 +443,13 @@ def test_docx_comment_spans_captures_image_rid_when_anchor_wraps_a_drawing():
 
 
 def test_extract_docx_comments_raw_reports_image_rids():
+    """이 테스트는 XML에서 rId를 뽑아내는 것만 확인하면 되고 실제 픽셀
+    내용은 안 보므로(그건 _find_image_location_in_pdf 쪽 책임), pymupdf
+    없이 아무 바이트나 media로 넣어도 된다 -- 'pdf' extra 없는 CI에서도
+    돈다."""
     from document_parser.parsing.loaders.office import _extract_docx_comments_raw
 
-    def make_png(seed: int) -> bytes:
-        import pymupdf
-
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 4, 4), False)
-        pix.set_rect(pix.irect, (seed, seed, seed))
-        return pix.tobytes("png")
-
-    data = _minimal_docx_with_image_comment(make_png(10), comment_text="Comment on a picture.")
+    data = _minimal_docx_with_image_comment(b"not a real png", comment_text="Comment on a picture.")
 
     comments = _extract_docx_comments_raw(data)
 
