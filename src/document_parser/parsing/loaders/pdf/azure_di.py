@@ -1,5 +1,11 @@
 """Azure Document Intelligence 추출 경로.
 
+**현재 파싱 파이프라인에서 안 쓴다** — pdf/graph.py가 이 모듈을 import하지
+않는다(표 구조 추출도, 스캔 페이지 본문 추출도 전부 VLM으로 대체함, vlm.py의
+caption_figures/transcribe_text_boxes 참고). 재검토 가능성이 있어 코드/테스트
+(test_azure_di_client.py)는 남겨뒀다 — 다시 쓰려면 graph.py에 이 모듈을 다시
+연결하면 된다.
+
 다이어그램 메모: 크롭 크기와 무관하게 페이지당 과금이라 크롭 없이 페이지
 전체를 한 번에 요청한다(VLM 경로와 다름).
 

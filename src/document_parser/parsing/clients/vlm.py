@@ -30,7 +30,7 @@ openai 클라이언트를 langsmith.wrappers.wrap_openai()로 감싼다 — 매 
   LANGCHAIN_API_KEY=<LangSmith API 키>
   LANGCHAIN_PROJECT=<프로젝트 이름, 선택. 기본값 "default">
 설정 안 하면(LANGCHAIN_TRACING_V2 미설정/false) 기존과 동일하게 동작한다 —
-LangGraph 노드 자체(analyze/native/azure_di/vlm/merge)의 트레이싱도 같은
+LangGraph 노드 자체(analyze/native/vlm/vlm_text/merge)의 트레이싱도 같은
 환경변수만으로 LangGraph가 자동으로 처리하므로 이쪽엔 별도 코드가 없다.
 """
 

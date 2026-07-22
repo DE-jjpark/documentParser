@@ -6,9 +6,9 @@ LibreOffice(soffice)는 pip 패키지가 아니라 시스템에 별도 설치해
 했던 것과 같은 종류의 외부 의존성. PATH에 soffice/libreoffice가 없으면
 MissingDependencyError를 던진다.
 
-변환 후에는 이미 만들어둔 pdf.load()(레이아웃 분석 → native/AzureDI/VLM
-라우팅 → 병합)를 그대로 재사용한다 — office 포맷만을 위한 별도 파싱 경로를
-새로 만들 필요가 없다.
+변환 후에는 이미 만들어둔 pdf.load()(레이아웃 분석 → native/VLM 라우팅 →
+병합)를 그대로 재사용한다 — office 포맷만을 위한 별도 파싱 경로를 새로
+만들 필요가 없다.
 
 슬라이드 노트/문서 댓글: 실측으로 확인한 바, LibreOffice의 기본
 ``--convert-to pdf``는 pptx 슬라이드 노트도 docx 댓글도 export하지

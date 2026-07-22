@@ -31,7 +31,7 @@ def _flatten(value: object, prefix: str = "") -> list[str]:
 
 
 def load(data: bytes, source: str, tier: str = "balanced") -> list[DocumentElement]:
-    # tier 무시 -- json은 애초에 AzureDI/VLM을 안 쓴다.
+    # tier 무시 -- json은 애초에 VLM을 안 쓴다.
     try:
         parsed = _json.loads(data.decode("utf-8", errors="replace"))
     except _json.JSONDecodeError as exc:

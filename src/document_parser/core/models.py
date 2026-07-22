@@ -26,11 +26,11 @@ class ElementType(StrEnum):
 class ParsingTier(StrEnum):
     """엔진 호출자가 고르는 속도/비용 대 품질 트레이드오프.
 
-    - FAST: native(pdfplumber)만 쓴다 — AzureDI/VLM 호출 자체를 안 한다.
+    - FAST: native(pdfplumber)만 쓴다 — VLM 호출 자체를 안 한다.
       텍스트 레이어 없는(스캔) 페이지는 뽑을 방법이 없어 그대로 유실된다 —
       "빠르고 무료"의 대가로 감수하는 것.
-    - BALANCED: 지금까지의 기본 파이프라인 그대로(표/그림 있으면 AzureDI·
-      VLM까지 태움).
+    - BALANCED: 지금까지의 기본 파이프라인 그대로(표/그림 있으면, 또는
+      텍스트 레이어가 없으면 VLM까지 태움).
     """
 
     FAST = "fast"
@@ -50,10 +50,9 @@ class DocumentElement(BaseModel):
     """A single structural unit extracted from a source document.
 
     ``bboxes`` is a list, not a single optional box: one element can
-    legitimately span multiple regions (e.g. an Azure Document Intelligence
-    paragraph that wraps across a column break has multiple
-    ``bounding_regions``). Empty means "no region info" (e.g. txt/md, which
-    have no coordinate space at all).
+    legitimately span multiple regions (e.g. a paragraph that wraps across a
+    column break). Empty means "no region info" (e.g. txt/md, which have no
+    coordinate space at all).
     """
 
     type: ElementType = ElementType.TEXT

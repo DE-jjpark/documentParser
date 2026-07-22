@@ -533,7 +533,7 @@ requires-dist = [
     { name = "python-multipart", marker = "extra == 'api'", specifier = ">=0.0.9" },
     { name = "uvicorn", marker = "extra == 'api'", specifier = ">=0.30" },
 ]
-provides-extras = ["pdf", "layout", "api", "azure", "vlm"]
+provides-extras = ["pdf", "layout", "api", "vlm", "azure"]
 
 [package.metadata.requires-dev]
 dev = [

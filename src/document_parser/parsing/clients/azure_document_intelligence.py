@@ -1,5 +1,8 @@
 """Azure Document Intelligence 클라이언트 (prebuilt-layout 모델).
 
+**현재 파싱 파이프라인에서 안 쓴다** — parsing/loaders/pdf/azure_di.py 참고
+(재검토 가능성이 있어 코드는 남겨뒀다).
+
 필요 환경변수:
   AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT   예) https://<리소스>.cognitiveservices.azure.com
   AZURE_DOCUMENT_INTELLIGENCE_KEY

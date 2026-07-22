@@ -3,7 +3,7 @@
 A loader is a callable ``(data: bytes, source: str, tier: str) -> list[DocumentElement]``.
 ``tier`` is ``"fast"`` or ``"balanced"`` (``ParsingTier``) -- most loaders
 ignore it (there's nothing to skip), only pdf/office/image care since they're
-the ones that can call AzureDI/VLM. Register new formats with ``register()``.
+the ones that can call VLM. Register new formats with ``register()``.
 """
 
 from collections.abc import Callable
