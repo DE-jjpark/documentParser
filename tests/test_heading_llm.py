@@ -11,6 +11,7 @@ from document_parser.parsing.clients.vlm import VLMCaptionResult
 from document_parser.parsing.loaders.pdf.heading_llm import (
     _parse_levels,
     assign_heading_levels_llm,
+    assign_heading_levels_llm_categorized,
 )
 
 
@@ -139,3 +140,74 @@ def test_response_wrapped_in_prose_or_code_fence_still_parses():
 def test_parse_levels_rejects_non_integer_and_boolean_values():
     assert _parse_levels(str([1, "two", 3]).replace("'", '"'), 3) == [1, None, 3]
     assert _parse_levels("[true, 2]", 2) == [None, 2]
+
+
+def test_categorized_assigns_levels_and_tags_level_source():
+    elements = [
+        _heading("Deck Title", block_type="doc_title"),
+        _heading("Chart caption", block_type="figure_title"),
+    ]
+
+    with patch(
+        "document_parser.parsing.loaders.pdf.heading_llm.complete_text_with_hard_timeout",
+        return_value=VLMCaptionResult(text="[1, 2]"),
+    ) as mock_complete:
+        with patch("document_parser.parsing.loaders.pdf.heading_llm.get_client"):
+            result = assign_heading_levels_llm_categorized(elements)
+
+    assert [el.metadata["level"] for el in result] == [1, 2]
+    assert all(el.metadata["level_source"] == "llm_categorized" for el in result)
+    mock_complete.assert_called_once()
+
+
+def test_categorized_prompt_spells_out_role_per_block_type():
+    """"llm"과 다르게 block_type을 참고용 힌트가 아니라 구조적 전제로
+    못박아야 한다 -- 세 카테고리 각각에 대한 명시적 판단 규칙이 프롬프트에
+    있는지 확인."""
+    elements = [_heading("Title", block_type="doc_title")]
+
+    with patch(
+        "document_parser.parsing.loaders.pdf.heading_llm.complete_text_with_hard_timeout",
+        return_value=VLMCaptionResult(text="[1]"),
+    ) as mock_complete:
+        with patch("document_parser.parsing.loaders.pdf.heading_llm.get_client"):
+            assign_heading_levels_llm_categorized(elements)
+
+    prompt = mock_complete.call_args.args[1]
+    assert "doc_title" in prompt
+    assert "paragraph_title" in prompt
+    assert "figure_title" in prompt
+    # "llm"(assign_heading_levels_llm)의 가벼운 힌트 문구와는 달라야 한다.
+    assert "참고만 하고" not in prompt
+
+
+def test_categorized_and_plain_llm_use_independent_prompts():
+    """두 전략이 서로 다른 프롬프트를 쓰는지(하나가 다른 하나를 그냥 감싸는
+    게 아닌지) 직접 비교."""
+    elements = [_heading("Overview", block_type="paragraph_title")]
+
+    with patch(
+        "document_parser.parsing.loaders.pdf.heading_llm.complete_text_with_hard_timeout",
+        return_value=VLMCaptionResult(text="[1]"),
+    ) as mock_complete:
+        with patch("document_parser.parsing.loaders.pdf.heading_llm.get_client"):
+            assign_heading_levels_llm(elements)
+            plain_prompt = mock_complete.call_args.args[1]
+
+            assign_heading_levels_llm_categorized(elements)
+            categorized_prompt = mock_complete.call_args.args[1]
+
+    assert plain_prompt != categorized_prompt
+
+
+def test_categorized_malformed_response_leaves_elements_unchanged():
+    elements = [_heading("A"), _heading("B")]
+
+    with patch(
+        "document_parser.parsing.loaders.pdf.heading_llm.complete_text_with_hard_timeout",
+        return_value=VLMCaptionResult(text="nope"),
+    ):
+        with patch("document_parser.parsing.loaders.pdf.heading_llm.get_client"):
+            result = assign_heading_levels_llm_categorized(elements)
+
+    assert all("level" not in el.metadata for el in result)

@@ -183,7 +183,7 @@ def _assign_heading_levels(elements: list[DocumentElement]) -> list[DocumentElem
     return result
 
 
-_HEADING_STRATEGIES = ("font_size", "llm")
+_HEADING_STRATEGIES = ("font_size", "llm", "llm_categorized")
 
 
 def load(
@@ -192,11 +192,14 @@ def load(
     tier: str = "balanced",
     heading_strategy: str = "font_size",
 ) -> list[DocumentElement]:
-    """``heading_strategy``: "font_size"(기본, _assign_heading_levels) 또는
-    "llm"(heading_llm.assign_heading_levels_llm) -- 둘 중 뭐가 실제 문서에서
-    더 정확한 계층 구조를 뽑는지 비교 평가하기 위한 병렬 경로. loaders 레지스트리
-    (parsing/loaders/__init__.py)의 공통 시그니처(tier까지)에는 아직 안 실었다
-    -- CLI/엔진까지 배선하는 건 비교가 끝난 뒤에 결정."""
+    """``heading_strategy``: "font_size"(기본, _assign_heading_levels) /
+    "llm"(heading_llm.assign_heading_levels_llm, block_type은 참고용 힌트) /
+    "llm_categorized"(heading_llm.assign_heading_levels_llm_categorized,
+    doc_title/paragraph_title/figure_title을 구조적으로 다른 역할로 프롬프트에
+    못박음) -- 셋 중 뭐가 실제 문서에서 더 정확한 계층 구조를 뽑는지 비교
+    평가하기 위한 병렬 경로들. loaders 레지스트리(parsing/loaders/__init__.py)
+    의 공통 시그니처(tier까지)에는 아직 안 실었다 -- CLI/엔진까지 배선하는 건
+    비교가 끝난 뒤에 결정."""
     if heading_strategy not in _HEADING_STRATEGIES:
         raise ValueError(
             f"unknown heading_strategy {heading_strategy!r}; expected one of {_HEADING_STRATEGIES}"
@@ -235,4 +238,10 @@ def load(
         from document_parser.parsing.loaders.pdf.heading_llm import assign_heading_levels_llm
 
         return assign_heading_levels_llm(elements)
+    if heading_strategy == "llm_categorized":
+        from document_parser.parsing.loaders.pdf.heading_llm import (
+            assign_heading_levels_llm_categorized,
+        )
+
+        return assign_heading_levels_llm_categorized(elements)
     return _assign_heading_levels(elements)

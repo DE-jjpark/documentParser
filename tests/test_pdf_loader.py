@@ -997,3 +997,30 @@ def test_load_llm_heading_strategy_uses_llm_path():
 
     mock_llm.assert_called_once()
     mock_font_size.assert_not_called()
+
+
+def test_load_llm_categorized_heading_strategy_uses_categorized_path():
+    from document_parser.parsing.loaders import pdf as pdf_module
+
+    with (
+        patch(
+            "document_parser.parsing.loaders.pdf._assign_heading_levels",
+        ) as mock_font_size,
+        patch(
+            "document_parser.parsing.loaders.pdf.heading_llm.assign_heading_levels_llm",
+        ) as mock_llm,
+        patch(
+            "document_parser.parsing.loaders.pdf.heading_llm.assign_heading_levels_llm_categorized",
+            side_effect=lambda els: els,
+        ) as mock_llm_categorized,
+    ):
+        pdf_module.load(
+            _one_page_pdf_with_heading(),
+            "doc.pdf",
+            tier="fast",
+            heading_strategy="llm_categorized",
+        )
+
+    mock_llm_categorized.assert_called_once()
+    mock_llm.assert_not_called()
+    mock_font_size.assert_not_called()
