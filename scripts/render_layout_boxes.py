@@ -368,10 +368,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("files", nargs="+", help="pdf/docx/pptx/doc/ppt 파일 경로들")
     parser.add_argument("--out-dir", default="layout_boxes")
-    parser.add_argument(
-        "--skip-vlm", action="store_true", help="VLM 버전은 안 만들고 PP-DocLayoutV2만"
-    )
+    parser.add_argument("--skip-v2", action="store_true", help="PP-DocLayoutV2 버전은 안 만듦")
     parser.add_argument("--skip-v3", action="store_true", help="PP-DocLayoutV3 버전은 안 만듦")
+    parser.add_argument("--skip-vlm", action="store_true", help="VLM 버전은 안 만듦")
     parser.add_argument(
         "--suppress-nested",
         action="store_true",
@@ -389,8 +388,9 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     for f in args.files:
         path = Path(f)
-        print(f"processing {path} (PP-DocLayoutV2)...", file=sys.stderr)
-        render(path, out_dir, args.suppress_nested, args.nested_threshold)
+        if not args.skip_v2:
+            print(f"processing {path} (PP-DocLayoutV2)...", file=sys.stderr)
+            render(path, out_dir, args.suppress_nested, args.nested_threshold)
         if not args.skip_v3:
             print(f"processing {path} (PP-DocLayoutV3)...", file=sys.stderr)
             render_v3(path, out_dir, args.suppress_nested, args.nested_threshold)
