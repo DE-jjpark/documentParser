@@ -18,5 +18,5 @@ offline_bundle/
 .env.*
 !.env.example
 
-# scripts/render_heading_boxes.py 산출물 -- 이미지/요약 JSON, git에 안 올림
-heading_boxes/
+# scripts/render_layout_boxes.py 산출물(주석 단 PDF), git에 안 올림
+layout_boxes/
