@@ -1,7 +1,14 @@
 """페이지 레이아웃 영역(25개 카테고리)을 실제 페이지 위에 카테고리별 색
-사각형+라벨로 표시해서 육안으로 확인할 수 있는 중간 산출물을 만든다. 두
+사각형+라벨로 표시해서 육안으로 확인할 수 있는 중간 산출물을 만든다. 세
 소스를 나란히 비교할 수 있게 파일을 따로 만든다:
   - <파일명>.pdf      -- PP-DocLayoutV2(전용 레이아웃 모델) 감지 결과
+  - <파일명>_v3.pdf   -- PP-DocLayoutV3 감지 결과. paddleocr의 PaddleOCRVL
+    파이프라인(레이아웃 감지 + 별도 0.9B VL 텍스트 인식 모델 ~2GB, 로컬
+    CPU 추론)은 안 쓰고, paddlex.create_model("PP-DocLayoutV3")로 레이아웃
+    감지 모델만 직접 불러온다 -- V2와 같은 비교축(레이아웃 감지 자체)을
+    보려는 거라 무거운 VL 인식 단계는 필요 없다. 실측 확인: 이 모델은
+    coordinate(4점 bbox, 픽셀 좌표)를 그대로 주므로 다각형 처리가 따로
+    필요 없었다.
   - <파일명>_vlm.pdf  -- VLM(페이지 이미지 + 25개 카테고리 프롬프트)이 직접
     감지한 결과 -- 전용 모델 없이 VLM만으로 레이아웃을 얼마나 잘 뽑는지
     비교하기 위한 것.
@@ -14,11 +21,14 @@ pdf/docx/pptx/doc/ppt 아무거나 받는다(office 포맷은 LibreOffice로 PDF
 후 같은 경로를 탄다 -- office.py가 실제로 하는 것과 동일).
 
 VLM 버전은 페이지마다 실제 VLM 호출이 발생한다(자격증명 필요, 문서 페이지
-수만큼 시간이 걸림) -- 필요 없으면 --skip-vlm으로 끈다.
+수만큼 시간이 걸림) -- 필요 없으면 --skip-vlm으로 끈다. V3 버전은 첫 실행
+때 가중치(~200MB)를 자동으로 받는다(~/.paddlex/official_models/PP-DocLayoutV3
+-- 이 프로젝트의 weights.py가 관리하는 캐시와는 별개, 순수 비교용 실험이라
+그대로 둠) -- 필요 없으면 --skip-v3로 끈다.
 
 사용법:
   python scripts/render_layout_boxes.py test1.pptx test2.pdf test3.docx
-  (기본 출력: layout_boxes/<파일명>.pdf + <파일명>_vlm.pdf,
+  (기본 출력: layout_boxes/<파일명>.pdf + <파일명>_v3.pdf + <파일명>_vlm.pdf,
    각각 첫 페이지는 카테고리 색 범례)
 """
 
@@ -29,6 +39,7 @@ import colorsys
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -153,6 +164,66 @@ def render(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{path.stem}.pdf"
+    doc.save(str(out_path))
+    page_count = doc.page_count - 1  # 범례 페이지 제외
+    doc.close()
+    print(f"  wrote {out_path} ({total_boxes} boxes across {page_count} pages)", file=sys.stderr)
+    return out_path
+
+
+def _get_v3_model():
+    """PaddleOCRVL 파이프라인(레이아웃 감지 + 별도 0.9B VL 텍스트 인식 모델
+    ~2GB) 전체는 안 띄우고, paddlex의 저수준 팩토리로 PP-DocLayoutV3
+    레이아웃 감지 모델만 직접 불러온다 -- V2(paddleocr.LayoutDetection)와
+    같은 비교축만 필요해서. 첫 호출 때 가중치(~200MB)를 자동으로 받는다."""
+    import paddlex
+
+    return paddlex.create_model("PP-DocLayoutV3")
+
+
+def _v3_boxes_for_page(model, page: pymupdf.Page) -> _BoxList:
+    pix = page.get_pixmap(dpi=RENDER_DPI)
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        pix.save(f.name)
+        (result,) = model.predict(f.name)
+
+    boxes: _BoxList = []
+    for box in result["boxes"]:
+        label = box["label"]
+        if label not in _COLORS:
+            print(f"    skipping unknown V3 label: {label}", file=sys.stderr)
+            continue
+        px_bbox = tuple(float(v) for v in box["coordinate"])
+        boxes.append((label, px_to_pt(px_bbox)))
+    return boxes
+
+
+def render_v3(
+    path: Path, out_dir: Path, suppress_nested: bool = False, nested_threshold: float = 0.8
+) -> Path:
+    pdf_bytes = _load_pdf_bytes(path)
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    model = _get_v3_model()
+
+    total_boxes = 0
+    for page in doc:
+        boxes = _v3_boxes_for_page(model, page)
+        if suppress_nested:
+            boxes = _suppress_nested(boxes, nested_threshold)
+        for label, bbox in boxes:
+            color = _COLORS[label]
+            rect = pymupdf.Rect(*bbox)
+            page.draw_rect(rect, color=color, width=1.2)
+            page.insert_text((rect.x0, max(rect.y0 - 3, 0)), label, color=color, fontsize=7)
+            total_boxes += 1
+
+    title = "layout box legend (PP-DocLayoutV3)"
+    if suppress_nested:
+        title += ", nested boxes suppressed"
+    _insert_legend_page(doc, title=title)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{path.stem}_v3.pdf"
     doc.save(str(out_path))
     page_count = doc.page_count - 1  # 범례 페이지 제외
     doc.close()
@@ -300,6 +371,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-vlm", action="store_true", help="VLM 버전은 안 만들고 PP-DocLayoutV2만"
     )
+    parser.add_argument("--skip-v3", action="store_true", help="PP-DocLayoutV3 버전은 안 만듦")
     parser.add_argument(
         "--suppress-nested",
         action="store_true",
@@ -319,6 +391,9 @@ def main() -> None:
         path = Path(f)
         print(f"processing {path} (PP-DocLayoutV2)...", file=sys.stderr)
         render(path, out_dir, args.suppress_nested, args.nested_threshold)
+        if not args.skip_v3:
+            print(f"processing {path} (PP-DocLayoutV3)...", file=sys.stderr)
+            render_v3(path, out_dir, args.suppress_nested, args.nested_threshold)
         if not args.skip_vlm:
             print(f"processing {path} (VLM)...", file=sys.stderr)
             render_vlm(path, out_dir, args.suppress_nested, args.nested_threshold)
