@@ -76,6 +76,47 @@ def _load_pdf_bytes(path: Path) -> bytes:
     raise ValueError(f"unsupported extension: {suffix} ({path})")
 
 
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    x0, y0, x1, y1 = bbox
+    return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+
+def _containment_ratio(
+    inner: tuple[float, float, float, float], outer: tuple[float, float, float, float]
+) -> float:
+    """inner가 outer 안에 얼마나(비율로) 들어있는지 -- inner 면적 기준(IoU가
+    아니라)이라 outer가 훨씬 커도 inner가 완전히 그 안에 있으면 1.0이 된다."""
+    ix0, iy0 = max(inner[0], outer[0]), max(inner[1], outer[1])
+    ix1, iy1 = min(inner[2], outer[2]), min(inner[3], outer[3])
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    intersection = (ix1 - ix0) * (iy1 - iy0)
+    inner_area = _bbox_area(inner)
+    return intersection / inner_area if inner_area > 0 else 0.0
+
+
+_BoxList = list[tuple[str, tuple[float, float, float, float]]]
+
+
+def _suppress_nested(boxes: _BoxList, threshold: float) -> _BoxList:
+    """더 큰 박스 안에 threshold 비율 이상 포함된 박스를 제거한다(라벨
+    무관) -- "표/카드처럼 큰 박스 하나로 감지됐는데 그 안의 글자들이 잘게
+    text로 또 감지돼서" 겹쳐 그려지는 걸 줄여달라는 요청에 따른 것. 자기보다
+    "엄격히 더 큰" 박스 기준으로만 억제한다(같은 크기끼리는 서로 안 지움)."""
+    result: _BoxList = []
+    for i, (label, bbox) in enumerate(boxes):
+        area = _bbox_area(bbox)
+        suppressed = any(
+            j != i
+            and _bbox_area(other_bbox) > area
+            and _containment_ratio(bbox, other_bbox) >= threshold
+            for j, (_, other_bbox) in enumerate(boxes)
+        )
+        if not suppressed:
+            result.append((label, bbox))
+    return result
+
+
 def _insert_legend_page(doc: pymupdf.Document, title: str) -> None:
     page = doc.new_page(0)
     page.insert_text((36, 36), title, fontsize=12)
@@ -86,21 +127,29 @@ def _insert_legend_page(doc: pymupdf.Document, title: str) -> None:
         page.insert_text((56, y + 10), label, fontsize=10)
 
 
-def render(path: Path, out_dir: Path) -> Path:
+def render(
+    path: Path, out_dir: Path, suppress_nested: bool = False, nested_threshold: float = 0.8
+) -> Path:
     pdf_bytes = _load_pdf_bytes(path)
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
 
     total_boxes = 0
     for page in doc:
         layout = analyze_page(page)
-        for box in layout.boxes:
-            color = _COLORS[box.label]
-            rect = pymupdf.Rect(*box.bbox)
+        boxes: _BoxList = [(box.label, box.bbox) for box in layout.boxes]
+        if suppress_nested:
+            boxes = _suppress_nested(boxes, nested_threshold)
+        for label, bbox in boxes:
+            color = _COLORS[label]
+            rect = pymupdf.Rect(*bbox)
             page.draw_rect(rect, color=color, width=1.2)
-            page.insert_text((rect.x0, max(rect.y0 - 3, 0)), box.label, color=color, fontsize=7)
+            page.insert_text((rect.x0, max(rect.y0 - 3, 0)), label, color=color, fontsize=7)
             total_boxes += 1
 
-    _insert_legend_page(doc, title="layout box legend (PP-DocLayoutV2, 25 categories)")
+    title = "layout box legend (PP-DocLayoutV2, 25 categories)"
+    if suppress_nested:
+        title += ", nested boxes suppressed"
+    _insert_legend_page(doc, title=title)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{path.stem}.pdf"
@@ -210,7 +259,9 @@ def _vlm_boxes_for_page(
     return boxes
 
 
-def render_vlm(path: Path, out_dir: Path) -> Path:
+def render_vlm(
+    path: Path, out_dir: Path, suppress_nested: bool = False, nested_threshold: float = 0.8
+) -> Path:
     pdf_bytes = _load_pdf_bytes(path)
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     client = get_client()
@@ -218,6 +269,8 @@ def render_vlm(path: Path, out_dir: Path) -> Path:
     total_boxes = 0
     for page_number, page in enumerate(doc, start=1):
         boxes = _vlm_boxes_for_page(client, page)
+        if suppress_nested:
+            boxes = _suppress_nested(boxes, nested_threshold)
         for label, bbox in boxes:
             color = _COLORS[label]
             rect = pymupdf.Rect(*bbox)
@@ -226,7 +279,10 @@ def render_vlm(path: Path, out_dir: Path) -> Path:
             total_boxes += 1
         print(f"    page {page_number}/{doc.page_count}: {len(boxes)} box(es)", file=sys.stderr)
 
-    _insert_legend_page(doc, title="layout box legend (VLM, 25-category prompt)")
+    title = "layout box legend (VLM, 25-category prompt)"
+    if suppress_nested:
+        title += ", nested boxes suppressed"
+    _insert_legend_page(doc, title=title)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{path.stem}_vlm.pdf"
@@ -244,16 +300,28 @@ def main() -> None:
     parser.add_argument(
         "--skip-vlm", action="store_true", help="VLM 버전은 안 만들고 PP-DocLayoutV2만"
     )
+    parser.add_argument(
+        "--suppress-nested",
+        action="store_true",
+        help="더 큰 박스 안에 거의 포함된(기본 80%%) 박스는 안 그림 -- "
+        "예: 표/카드 박스 하나 안에 text가 잘게 또 잡힌 경우 정리",
+    )
+    parser.add_argument(
+        "--nested-threshold",
+        type=float,
+        default=0.8,
+        help="--suppress-nested의 포함 비율 임계값(0~1, 기본 0.8)",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
     for f in args.files:
         path = Path(f)
         print(f"processing {path} (PP-DocLayoutV2)...", file=sys.stderr)
-        render(path, out_dir)
+        render(path, out_dir, args.suppress_nested, args.nested_threshold)
         if not args.skip_vlm:
             print(f"processing {path} (VLM)...", file=sys.stderr)
-            render_vlm(path, out_dir)
+            render_vlm(path, out_dir, args.suppress_nested, args.nested_threshold)
 
 
 if __name__ == "__main__":
