@@ -594,16 +594,26 @@ def _resolve_conflicts(
     return resolved
 
 
-# VLM 전체 감지 결과 중 기존(V2/V3 병합) 박스와 이 비율 미만으로만 겹치는
-# 것만 "미검출 영역 보간"으로 추가한다 -- 이미 V2/V3가 비슷하게 잡은 걸
-# VLM으로 또 중복 추가하지 않기 위함.
-_GAP_FILL_OVERLAP_THRESHOLD = 0.3
+# VLM 전체 감지 결과 중 기존(V2/V3 병합) 박스와 이 비율 이상 겹치면
+# "이미 다른 걸로 잡힌 영역"으로 보고 버린다 -- image/table로 잡힌 영역
+# 안의 글자를 VLM이 별도 text로 또 잡거나, V2/V3가 이미 text로 잡은 걸
+# VLM이 중복으로 또 잡는 걸 막기 위함. 0.3(기존 값)보다 낮춰서 살짝만
+# 겹쳐도 보수적으로 버린다 -- "빠뜨린 텍스트 보충"이 목적이라 애매하면
+# 안 넣는 쪽이 낫다(잘못 겹쳐 그려지는 것보다).
+_GAP_FILL_OVERLAP_THRESHOLD = 0.15
 
 
 def _gap_fill_boxes(vlm_boxes: _BoxList, existing: _ScoredBoxList) -> _ScoredBoxList:
+    """V2/V3 둘 다 놓친 "text"만 VLM으로 보충한다 -- image/table/chart 등
+    다른 카테고리는 V2/V3가 이미 전담하고 있어서 VLM 보간 대상에서 아예
+    뺀다(카테고리 신뢰도가 V2/V3보다 낮기도 하고, 굳이 겹칠 이유가 없음).
+    기존 박스(카테고리 무관 -- image/table 안이든 이미 잡힌 text든)와
+    조금이라도 겹치면 그 영역은 이미 처리된 걸로 보고 버린다."""
     existing_bboxes = [b for _, b, _ in existing]
     gaps: _ScoredBoxList = []
     for label, bbox in vlm_boxes:
+        if label != "text":
+            continue
         max_overlap = max((_containment_ratio(bbox, eb) for eb in existing_bboxes), default=0.0)
         if max_overlap < _GAP_FILL_OVERLAP_THRESHOLD:
             # score=0: V2/V3 confidence가 아니라 VLM 보간이라는 표시
