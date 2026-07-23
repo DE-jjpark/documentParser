@@ -1,7 +1,10 @@
 """페이지 레이아웃 영역(25개 카테고리)을 실제 페이지 위에 카테고리별 색
 사각형+라벨로 표시해서 육안으로 확인할 수 있는 중간 산출물을 만든다. 세
 소스를 나란히 비교할 수 있게 파일을 따로 만든다:
-  - <파일명>.pdf      -- PP-DocLayoutV2(전용 레이아웃 모델) 감지 결과
+  - <파일명>.pdf      -- PP-DocLayoutV2(전용 레이아웃 모델) 감지 결과. 원본
+    production 코드(layout.py의 analyze_page)와 달리 정사각형 레터박스
+    패딩을 적용한다(모델이 800x800 고정 입력이라 원본을 그대로 넣으면
+    비정사각형 문서가 찌그러짐 -- _square_pad_png 참고).
   - <파일명>_v3.pdf   -- PP-DocLayoutV3 감지 결과. paddleocr의 PaddleOCRVL
     파이프라인(레이아웃 감지 + 별도 0.9B VL 텍스트 인식 모델 ~2GB, 로컬
     CPU 추론)은 안 쓰고, paddlex.create_model("PP-DocLayoutV3")로 레이아웃
@@ -48,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import pymupdf  # noqa: E402
 
 from document_parser.parsing.loaders.pdf.coords import RENDER_DPI, px_to_pt  # noqa: E402
-from document_parser.parsing.loaders.pdf.layout import ALL_LABELS, analyze_page  # noqa: E402
+from document_parser.parsing.loaders.pdf.layout import ALL_LABELS  # noqa: E402
 from document_parser.parsing.loaders.vlm_caption import (  # noqa: E402
     caption_with_hard_timeout,
     get_client,
@@ -139,16 +142,67 @@ def _insert_legend_page(doc: pymupdf.Document, title: str) -> None:
         page.insert_text((56, y + 10), label, fontsize=10)
 
 
+def _square_pad_png(pix: pymupdf.Pixmap) -> bytes:
+    """PP-DocLayoutV2/V3는 입력 크기가 고정(800x800, STATIC_SHAPE_MODEL_LIST)
+    이고 keep_ratio=False라서, 원본 그대로 넣으면 세로 PDF나 16:9 PPT
+    슬라이드가 정사각형으로 눌려 찌그러진다(실측 확인: img_size 오버라이드
+    자체가 이 모델들에서 아예 막혀 있음). 대신 우리가 먼저 원본 비율 그대로
+    정사각형 캔버스(흰 여백)에 좌상단 기준으로 얹어서 넣는다 -- 모델
+    내부의 800x800 리사이즈가 "이미 정사각형인" 이미지에 적용되니 실제
+    내용은 안 찌그러진다. 좌상단 기준(오프셋 0,0)이라 반환되는 bbox
+    좌표가 원본 픽셀 좌표와 그대로 맞는다(별도 역변환 불필요)."""
+    from PIL import Image
+
+    img = Image.open(BytesIO(pix.tobytes("png")))
+    side = max(pix.width, pix.height)
+    canvas = Image.new("RGB", (side, side), (255, 255, 255))
+    canvas.paste(img, (0, 0))
+    out = BytesIO()
+    canvas.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _get_v2_model():
+    """document_parser.parsing.loaders.pdf.layout.analyze_page()는 원본
+    이미지를 그대로 모델에 넣어서(정사각형 패딩 없음) 쓴다 -- 이 스크립트는
+    비교/실험 목적이라 여기서만 패딩된 버전을 별도로 돌린다. 가중치는
+    이 프로젝트가 관리하는 캐시(weights.py)를 그대로 재사용."""
+    from paddleocr import LayoutDetection
+
+    from document_parser.parsing.weights import layout_model_dir
+
+    return LayoutDetection(model_name="PP-DocLayoutV2", model_dir=str(layout_model_dir()))
+
+
+def _v2_boxes_for_page(model, page: pymupdf.Page) -> _BoxList:
+    pix = page.get_pixmap(dpi=RENDER_DPI)
+    padded_png = _square_pad_png(pix)
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        f.write(padded_png)
+        f.flush()
+        (result,) = model.predict(f.name, batch_size=1, layout_nms=True)
+
+    boxes: _BoxList = []
+    for box in result["boxes"]:
+        label = box["label"]
+        if label not in _COLORS:
+            print(f"    skipping unknown V2 label: {label}", file=sys.stderr)
+            continue
+        px_bbox = tuple(float(v) for v in box["coordinate"])
+        boxes.append((label, px_to_pt(px_bbox)))
+    return boxes
+
+
 def render(
     path: Path, out_dir: Path, suppress_nested: bool = False, nested_threshold: float = 0.8
 ) -> Path:
     pdf_bytes = _load_pdf_bytes(path)
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    model = _get_v2_model()
 
     total_boxes = 0
     for page in doc:
-        layout = analyze_page(page)
-        boxes: _BoxList = [(box.label, box.bbox) for box in layout.boxes]
+        boxes = _v2_boxes_for_page(model, page)
         if suppress_nested:
             boxes = _suppress_nested(boxes, nested_threshold)
         for label, bbox in boxes:
@@ -158,7 +212,7 @@ def render(
             page.insert_text((rect.x0, max(rect.y0 - 3, 0)), label, color=color, fontsize=7)
             total_boxes += 1
 
-    title = "layout box legend (PP-DocLayoutV2, 25 categories)"
+    title = "layout box legend (PP-DocLayoutV2, square-padded input)"
     if suppress_nested:
         title += ", nested boxes suppressed"
     _insert_legend_page(doc, title=title)
@@ -180,26 +234,6 @@ def _get_v3_model():
     import paddlex
 
     return paddlex.create_model("PP-DocLayoutV3")
-
-
-def _square_pad_png(pix: pymupdf.Pixmap) -> bytes:
-    """PP-DocLayoutV3/V2는 입력 크기가 고정(800x800, STATIC_SHAPE_MODEL_LIST)
-    이고 keep_ratio=False라서, 원본 그대로 넣으면 세로 PDF나 16:9 PPT
-    슬라이드가 정사각형으로 눌려 찌그러진다(실측 확인: img_size 오버라이드
-    자체가 이 모델에서 아예 막혀 있음). 대신 우리가 먼저 원본 비율 그대로
-    정사각형 캔버스(흰 여백)에 좌상단 기준으로 얹어서 넣는다 -- 모델
-    내부의 800x800 리사이즈가 "이미 정사각형인" 이미지에 적용되니 실제
-    내용은 안 찌그러진다. 좌상단 기준(오프셋 0,0)이라 반환되는 bbox
-    좌표가 원본 픽셀 좌표와 그대로 맞는다(별도 역변환 불필요)."""
-    from PIL import Image
-
-    img = Image.open(BytesIO(pix.tobytes("png")))
-    side = max(pix.width, pix.height)
-    canvas = Image.new("RGB", (side, side), (255, 255, 255))
-    canvas.paste(img, (0, 0))
-    out = BytesIO()
-    canvas.save(out, format="PNG")
-    return out.getvalue()
 
 
 def _v3_boxes_for_page(model, page: pymupdf.Page) -> _BoxList:
