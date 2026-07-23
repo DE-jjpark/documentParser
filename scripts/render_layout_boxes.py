@@ -603,21 +603,53 @@ def _resolve_conflicts(
 _GAP_FILL_OVERLAP_THRESHOLD = 0.15
 
 
-def _gap_fill_boxes(vlm_boxes: _BoxList, existing: _ScoredBoxList) -> _ScoredBoxList:
+# 실측 확인: text_only로 좁혀도 VLM이 실제로는 빈 공간인데 "text가 있다"고
+# 잘못 답하는(hallucination) 경우가 남아있었다 -- gap-fill 후보 bbox 안에
+# 실제 잉크(글자/그림 등 흰 배경이 아닌 픽셀)가 이 비율 이상 있어야만
+# 채택한다.
+_MIN_INK_RATIO = 0.02
+_INK_THRESHOLD = 240  # 이 값보다 어두우면(0=검정, 255=흰색) "잉크"로 본다
+
+
+def _has_visible_content(page: pymupdf.Page, bbox: tuple[float, float, float, float]) -> bool:
+    from PIL import Image
+
+    clip = pymupdf.Rect(*bbox) & page.rect
+    if clip.is_empty:
+        return False
+    pix = page.get_pixmap(dpi=RENDER_DPI, clip=clip)
+    if pix.width == 0 or pix.height == 0:
+        return False
+    img = Image.open(BytesIO(pix.tobytes("png"))).convert("L")
+    import numpy as np
+
+    arr = np.asarray(img)
+    ink_ratio = (arr < _INK_THRESHOLD).sum() / arr.size
+    return ink_ratio >= _MIN_INK_RATIO
+
+
+def _gap_fill_boxes(
+    page: pymupdf.Page, vlm_boxes: _BoxList, existing: _ScoredBoxList
+) -> _ScoredBoxList:
     """V2/V3 둘 다 놓친 "text"만 VLM으로 보충한다 -- image/table/chart 등
     다른 카테고리는 V2/V3가 이미 전담하고 있어서 VLM 보간 대상에서 아예
     뺀다(카테고리 신뢰도가 V2/V3보다 낮기도 하고, 굳이 겹칠 이유가 없음).
     기존 박스(카테고리 무관 -- image/table 안이든 이미 잡힌 text든)와
-    조금이라도 겹치면 그 영역은 이미 처리된 걸로 보고 버린다."""
+    조금이라도 겹치면 그 영역은 이미 처리된 걸로 보고 버린다. 마지막으로
+    실제 페이지에 그 자리에 잉크(내용)가 있는지 확인해서, VLM이 빈 공간에
+    text가 있다고 잘못 답한 경우(hallucination)를 걸러낸다."""
     existing_bboxes = [b for _, b, _ in existing]
     gaps: _ScoredBoxList = []
     for label, bbox in vlm_boxes:
         if label != "text":
             continue
         max_overlap = max((_containment_ratio(bbox, eb) for eb in existing_bboxes), default=0.0)
-        if max_overlap < _GAP_FILL_OVERLAP_THRESHOLD:
-            # score=0: V2/V3 confidence가 아니라 VLM 보간이라는 표시
-            gaps.append((label, bbox, 0.0))
+        if max_overlap >= _GAP_FILL_OVERLAP_THRESHOLD:
+            continue
+        if not _has_visible_content(page, bbox):
+            continue
+        # score=0: V2/V3 confidence가 아니라 VLM 보간이라는 표시
+        gaps.append((label, bbox, 0.0))
     return gaps
 
 
@@ -643,7 +675,7 @@ def render_merged(
         merged = _resolve_conflicts(client, page, v2_boxes, v3_boxes, matched) + v2_only + v3_only
 
         vlm_boxes = _vlm_boxes_for_page(client, page)
-        gaps = _gap_fill_boxes(vlm_boxes, merged)
+        gaps = _gap_fill_boxes(page, vlm_boxes, merged)
         merged = merged + gaps
 
         boxes: _BoxList = [(label, bbox) for label, bbox, _score in merged]
