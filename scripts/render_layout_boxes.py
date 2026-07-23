@@ -40,6 +40,7 @@ import json
 import re
 import sys
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -181,10 +182,32 @@ def _get_v3_model():
     return paddlex.create_model("PP-DocLayoutV3")
 
 
+def _square_pad_png(pix: pymupdf.Pixmap) -> bytes:
+    """PP-DocLayoutV3/V2는 입력 크기가 고정(800x800, STATIC_SHAPE_MODEL_LIST)
+    이고 keep_ratio=False라서, 원본 그대로 넣으면 세로 PDF나 16:9 PPT
+    슬라이드가 정사각형으로 눌려 찌그러진다(실측 확인: img_size 오버라이드
+    자체가 이 모델에서 아예 막혀 있음). 대신 우리가 먼저 원본 비율 그대로
+    정사각형 캔버스(흰 여백)에 좌상단 기준으로 얹어서 넣는다 -- 모델
+    내부의 800x800 리사이즈가 "이미 정사각형인" 이미지에 적용되니 실제
+    내용은 안 찌그러진다. 좌상단 기준(오프셋 0,0)이라 반환되는 bbox
+    좌표가 원본 픽셀 좌표와 그대로 맞는다(별도 역변환 불필요)."""
+    from PIL import Image
+
+    img = Image.open(BytesIO(pix.tobytes("png")))
+    side = max(pix.width, pix.height)
+    canvas = Image.new("RGB", (side, side), (255, 255, 255))
+    canvas.paste(img, (0, 0))
+    out = BytesIO()
+    canvas.save(out, format="PNG")
+    return out.getvalue()
+
+
 def _v3_boxes_for_page(model, page: pymupdf.Page) -> _BoxList:
     pix = page.get_pixmap(dpi=RENDER_DPI)
+    padded_png = _square_pad_png(pix)
     with tempfile.NamedTemporaryFile(suffix=".png") as f:
-        pix.save(f.name)
+        f.write(padded_png)
+        f.flush()
         (result,) = model.predict(f.name)
 
     boxes: _BoxList = []
