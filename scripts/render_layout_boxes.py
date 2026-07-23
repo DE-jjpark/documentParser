@@ -245,8 +245,11 @@ _VLM_LAYOUT_PROMPT = (
     f"{', '.join(sorted(ALL_LABELS))}.\n\n"
     "이미지 위에 회색 좌표 격자가 그려져 있다 -- 위쪽 가장자리 숫자가 x좌표, "
     f"왼쪽 가장자리 숫자가 y좌표다({_GRID_STEP} 단위 눈금, 왼쪽 위가 (0,0), "
-    "오른쪽 아래가 (1000,1000)). 이 눈금을 실제로 읽어서 각 영역의 경계가 "
-    "어느 눈금 근처인지 최대한 정확히 맞춰 답해라 -- 대충 짐작하지 말 것.\n\n"
+    "오른쪽 아래가 (1000,1000), 이미지 밖으로 나가는 값은 절대 없다). 이 눈금을 "
+    "실제로 읽어서 각 영역의 경계가 어느 눈금 근처인지 최대한 정확히 맞춰 "
+    "답해라 -- 대충 짐작하지 말 것. 모든 좌표는 반드시 0 이상 1000 이하여야 "
+    "한다 -- 1000을 넘는 값은 절대 쓰지 마라(이미지 오른쪽/아래쪽 끝이 정확히 "
+    "1000이다).\n\n"
     "답변은 반드시 JSON 배열 하나만 출력해라(다른 설명 문장 없이). 각 원소는 "
     '{"label": "<카테고리>", "bbox": [x0, y0, x1, y1]} 형식이다(x0,y0,x1,y1 '
     "모두 0~1000 사이 정규화 좌표)."
@@ -260,7 +263,13 @@ def _parse_vlm_boxes(text: str) -> list[tuple[str, tuple[float, float, float, fl
     의 _parse_levels와 같은 관대한 원칙: 형식이 안 맞는 개별 원소는 그냥
     건너뛰고(전체를 버리지 않음) -- 여기선 "일부만 그려지는 것"이 heading
     레벨과 달리 위험하지 않다(육안 확인용이라 일부 박스 유실이 큰 문제가
-    아님)."""
+    아님).
+
+    실측 확인한 버그: 프롬프트에서 0~1000 범위를 명시해도 모델이 종종
+    1000을 넘는 값(예: 1380)을 그냥 내놓는다 -- 이걸 검증 없이 그대로
+    px_to_pt로 넘기면 박스가 페이지 밖으로 삐져나가게 그려진다. 여기서
+    0~1000으로 클램프하고, 클램프 후 찌그러진(x1<=x0 또는 y1<=y0) 박스는
+    버린다."""
     match = _JSON_ARRAY.search(text)
     if not match:
         return []
@@ -277,14 +286,21 @@ def _parse_vlm_boxes(text: str) -> list[tuple[str, tuple[float, float, float, fl
             continue
         label = item.get("label")
         bbox = item.get("bbox")
-        if (
+        if not (
             isinstance(label, str)
             and label in _COLORS
             and isinstance(bbox, list)
             and len(bbox) == 4
             and all(isinstance(v, int | float) and not isinstance(v, bool) for v in bbox)
         ):
-            boxes.append((label, (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))))
+            continue
+        x0 = min(max(float(bbox[0]), 0.0), 1000.0)
+        y0 = min(max(float(bbox[1]), 0.0), 1000.0)
+        x1 = min(max(float(bbox[2]), 0.0), 1000.0)
+        y1 = min(max(float(bbox[3]), 0.0), 1000.0)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        boxes.append((label, (x0, y0, x1, y1)))
     return boxes
 
 
