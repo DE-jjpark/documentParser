@@ -174,7 +174,10 @@ def _get_v2_model():
     return LayoutDetection(model_name="PP-DocLayoutV2", model_dir=str(layout_model_dir()))
 
 
-def _v2_boxes_for_page(model, page: pymupdf.Page) -> _BoxList:
+_ScoredBoxList = list[tuple[str, tuple[float, float, float, float], float]]
+
+
+def _v2_boxes_for_page(model, page: pymupdf.Page) -> _ScoredBoxList:
     pix = page.get_pixmap(dpi=RENDER_DPI)
     padded_png = _square_pad_png(pix)
     with tempfile.NamedTemporaryFile(suffix=".png") as f:
@@ -182,14 +185,14 @@ def _v2_boxes_for_page(model, page: pymupdf.Page) -> _BoxList:
         f.flush()
         (result,) = model.predict(f.name, batch_size=1, layout_nms=True)
 
-    boxes: _BoxList = []
+    boxes: _ScoredBoxList = []
     for box in result["boxes"]:
         label = box["label"]
         if label not in _COLORS:
             print(f"    skipping unknown V2 label: {label}", file=sys.stderr)
             continue
         px_bbox = tuple(float(v) for v in box["coordinate"])
-        boxes.append((label, px_to_pt(px_bbox)))
+        boxes.append((label, px_to_pt(px_bbox), float(box.get("score", 0.0))))
     return boxes
 
 
@@ -202,7 +205,7 @@ def render(
 
     total_boxes = 0
     for page in doc:
-        boxes = _v2_boxes_for_page(model, page)
+        boxes: _BoxList = [(label, bbox) for label, bbox, _score in _v2_boxes_for_page(model, page)]
         if suppress_nested:
             boxes = _suppress_nested(boxes, nested_threshold)
         for label, bbox in boxes:
@@ -236,7 +239,7 @@ def _get_v3_model():
     return paddlex.create_model("PP-DocLayoutV3")
 
 
-def _v3_boxes_for_page(model, page: pymupdf.Page) -> _BoxList:
+def _v3_boxes_for_page(model, page: pymupdf.Page) -> _ScoredBoxList:
     pix = page.get_pixmap(dpi=RENDER_DPI)
     padded_png = _square_pad_png(pix)
     with tempfile.NamedTemporaryFile(suffix=".png") as f:
@@ -244,14 +247,14 @@ def _v3_boxes_for_page(model, page: pymupdf.Page) -> _BoxList:
         f.flush()
         (result,) = model.predict(f.name)
 
-    boxes: _BoxList = []
+    boxes: _ScoredBoxList = []
     for box in result["boxes"]:
         label = box["label"]
         if label not in _COLORS:
             print(f"    skipping unknown V3 label: {label}", file=sys.stderr)
             continue
         px_bbox = tuple(float(v) for v in box["coordinate"])
-        boxes.append((label, px_to_pt(px_bbox)))
+        boxes.append((label, px_to_pt(px_bbox), float(box.get("score", 0.0))))
     return boxes
 
 
@@ -264,7 +267,7 @@ def render_v3(
 
     total_boxes = 0
     for page in doc:
-        boxes = _v3_boxes_for_page(model, page)
+        boxes: _BoxList = [(label, bbox) for label, bbox, _score in _v3_boxes_for_page(model, page)]
         if suppress_nested:
             boxes = _suppress_nested(boxes, nested_threshold)
         for label, bbox in boxes:
@@ -437,6 +440,236 @@ def render_vlm(
     return out_path
 
 
+def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    intersection = (ix1 - ix0) * (iy1 - iy0)
+    union = _bbox_area(a) + _bbox_area(b) - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+# 이 IoU 이상이면 "같은 영역을 가리킨다"고 보고 매칭한다 -- 너무 낮으면
+# 관련 없는 박스끼리 억지로 짝지어지고, 너무 높으면 실제로 같은 영역인데
+# 두 모델이 살짝 다르게 잡은 것도 매칭 실패로 "둘 다 유니크한 박스"가 돼서
+# 중복으로 그려진다.
+_MATCH_IOU_THRESHOLD = 0.3
+
+
+def _match_v2_v3(
+    v2_boxes: _ScoredBoxList, v3_boxes: _ScoredBoxList
+) -> tuple[list[tuple[int, int]], _ScoredBoxList, _ScoredBoxList]:
+    """V2/V3 박스를 IoU로 매칭한다(greedy -- 각 V2 박스는 아직 안 잡힌 V3
+    박스 중 IoU가 가장 높은 것과 짝짓는다). 반환: (매칭된 (v2_idx, v3_idx)
+    쌍, V2에만 있는 박스, V3에만 있는 박스)."""
+    matched: list[tuple[int, int]] = []
+    matched_v3: set[int] = set()
+    for i, (_, b2, _) in enumerate(v2_boxes):
+        best_j, best_iou = None, _MATCH_IOU_THRESHOLD
+        for j, (_, b3, _) in enumerate(v3_boxes):
+            if j in matched_v3:
+                continue
+            iou = _iou(b2, b3)
+            if iou > best_iou:
+                best_j, best_iou = j, iou
+        if best_j is not None:
+            matched.append((i, best_j))
+            matched_v3.add(best_j)
+    matched_v2 = {i for i, _ in matched}
+    v2_only = [v2_boxes[i] for i in range(len(v2_boxes)) if i not in matched_v2]
+    v3_only = [v3_boxes[j] for j in range(len(v3_boxes)) if j not in matched_v3]
+    return matched, v2_only, v3_only
+
+
+_CONFLICT_PROMPT_HEADER = (
+    "아래 페이지 이미지에 주황색 박스와 번호로 표시된 영역들은, 두 개의 서로 "
+    "다른 레이아웃 감지 모델이 같은 위치에 서로 다른 카테고리를 붙인 곳이다. "
+    "각 번호에 대해 실제 내용을 보고 더 정확한 카테고리를 골라라 -- 제시된 두 "
+    "후보 중 하나를 골라도 되고, 둘 다 틀렸으면 올바른 카테고리를 직접 써도 "
+    "된다. 카테고리는 반드시 다음 중에서만 골라라: {labels}.\n\n"
+    "후보 목록(번호. v2 후보=..., v3 후보=...):\n{candidates}\n\n"
+    "답변은 반드시 JSON 배열 하나만 출력해라(다른 설명 문장 없이). 각 원소는 "
+    '{{"id": <번호>, "label": "<선택한 카테고리>"}} 형식이다.'
+)
+
+
+_ConflictSpan = tuple[int, tuple[float, float, float, float], tuple[float, float, float, float]]
+
+
+def _conflict_overlay_png(page: pymupdf.Page, conflicts: list[_ConflictSpan]) -> bytes:
+    """page 자체는 안 건드리고 별도 스크래치 문서에 충돌 영역(두 박스의
+    합집합)만 번호와 함께 주황색으로 표시한다."""
+    scratch = pymupdf.open()
+    scratch.insert_pdf(page.parent, from_page=page.number, to_page=page.number)
+    p = scratch[0]
+    orange = (1, 0.5, 0)
+    for cid, bbox_a, bbox_b in conflicts:
+        union = (
+            min(bbox_a[0], bbox_b[0]),
+            min(bbox_a[1], bbox_b[1]),
+            max(bbox_a[2], bbox_b[2]),
+            max(bbox_a[3], bbox_b[3]),
+        )
+        rect = pymupdf.Rect(*union)
+        p.draw_rect(rect, color=orange, width=2)
+        p.insert_text((rect.x0, max(rect.y0 - 10, 0)), str(cid), color=orange, fontsize=10)
+    pix = p.get_pixmap(dpi=RENDER_DPI)
+    png_bytes = pix.tobytes("png")
+    scratch.close()
+    return png_bytes
+
+
+def _parse_conflict_choices(text: str, expected_ids: set[int]) -> dict[int, str]:
+    match = _JSON_ARRAY.search(text)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, list):
+        return {}
+    choices: dict[int, str] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        cid, label = item.get("id"), item.get("label")
+        if (
+            isinstance(cid, int)
+            and not isinstance(cid, bool)
+            and cid in expected_ids
+            and isinstance(label, str)
+            and label in _COLORS
+        ):
+            choices[cid] = label
+    return choices
+
+
+def _resolve_conflicts(
+    client,
+    page: pymupdf.Page,
+    v2_boxes: _ScoredBoxList,
+    v3_boxes: _ScoredBoxList,
+    matched: list[tuple[int, int]],
+) -> _ScoredBoxList:
+    """매칭된 쌍 중 라벨이 같으면 LLM 호출 없이 score 높은 쪽 bbox를 채택하고,
+    라벨이 다른(진짜 충돌인) 것만 모아서 페이지당 LLM 호출 한 번으로 판정한다
+    -- 충돌마다 따로 호출하면 문서당 수십 번씩 불필요하게 부를 수 있어서."""
+    resolved: _ScoredBoxList = []
+    conflicts: list[tuple[int, str, tuple, float, str, tuple, float]] = []
+    for v2i, v3i in matched:
+        l2, b2, s2 = v2_boxes[v2i]
+        l3, b3, s3 = v3_boxes[v3i]
+        if l2 == l3:
+            resolved.append((l2, b2, s2) if s2 >= s3 else (l3, b3, s3))
+        else:
+            conflicts.append((len(conflicts) + 1, l2, b2, s2, l3, b3, s3))
+
+    if not conflicts:
+        return resolved
+
+    spans = [(cid, b2, b3) for cid, _, b2, _, _, b3, _ in conflicts]
+    overlay_png = _conflict_overlay_png(page, spans)
+    candidates_text = "\n".join(
+        f"{cid}. v2 후보={l2}, v3 후보={l3}" for cid, l2, _, _, l3, _, _ in conflicts
+    )
+    prompt = _CONFLICT_PROMPT_HEADER.format(
+        labels=", ".join(sorted(ALL_LABELS)), candidates=candidates_text
+    )
+    result = caption_with_hard_timeout(client, overlay_png, prompt)
+    choices = _parse_conflict_choices(result.text, {c[0] for c in conflicts})
+
+    for cid, l2, b2, s2, l3, b3, s3 in conflicts:
+        chosen = choices.get(cid)
+        if chosen == l3:
+            resolved.append((l3, b3, s3))
+        elif chosen is not None and chosen != l2:
+            # LLM이 v2/v3 둘 다 아닌 라벨을 직접 줬다 -- bbox는 score 높은
+            # 쪽을 쓰고 라벨만 교체.
+            resolved.append((chosen, b2 if s2 >= s3 else b3, max(s2, s3)))
+        else:
+            # 응답이 없거나(파싱 실패) v2를 골랐으면 v2로 폴백.
+            resolved.append((l2, b2, s2))
+    return resolved
+
+
+# VLM 전체 감지 결과 중 기존(V2/V3 병합) 박스와 이 비율 미만으로만 겹치는
+# 것만 "미검출 영역 보간"으로 추가한다 -- 이미 V2/V3가 비슷하게 잡은 걸
+# VLM으로 또 중복 추가하지 않기 위함.
+_GAP_FILL_OVERLAP_THRESHOLD = 0.3
+
+
+def _gap_fill_boxes(vlm_boxes: _BoxList, existing: _ScoredBoxList) -> _ScoredBoxList:
+    existing_bboxes = [b for _, b, _ in existing]
+    gaps: _ScoredBoxList = []
+    for label, bbox in vlm_boxes:
+        max_overlap = max((_containment_ratio(bbox, eb) for eb in existing_bboxes), default=0.0)
+        if max_overlap < _GAP_FILL_OVERLAP_THRESHOLD:
+            # score=0: V2/V3 confidence가 아니라 VLM 보간이라는 표시
+            gaps.append((label, bbox, 0.0))
+    return gaps
+
+
+def render_merged(
+    path: Path, out_dir: Path, suppress_nested: bool = False, nested_threshold: float = 0.8
+) -> Path:
+    """V2 + V3 + VLM을 다 합친 버전 -- 겹치는 영역은 라벨이 같으면 score
+    높은 쪽, 다르면 LLM이 페이지당 한 번에 판정하고, 어느 모델도 못 잡은
+    영역은 VLM 전체 감지 결과에서 보간한다. 세 경로를 각각 다 돌리므로
+    비용/시간이 제일 크다."""
+    pdf_bytes = _load_pdf_bytes(path)
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    v2_model = _get_v2_model()
+    v3_model = _get_v3_model()
+    client = get_client()
+
+    total_boxes = 0
+    total_gap_filled = 0
+    for page_number, page in enumerate(doc, start=1):
+        v2_boxes = _v2_boxes_for_page(v2_model, page)
+        v3_boxes = _v3_boxes_for_page(v3_model, page)
+        matched, v2_only, v3_only = _match_v2_v3(v2_boxes, v3_boxes)
+        merged = _resolve_conflicts(client, page, v2_boxes, v3_boxes, matched) + v2_only + v3_only
+
+        vlm_boxes = _vlm_boxes_for_page(client, page)
+        gaps = _gap_fill_boxes(vlm_boxes, merged)
+        merged = merged + gaps
+
+        boxes: _BoxList = [(label, bbox) for label, bbox, _score in merged]
+        if suppress_nested:
+            boxes = _suppress_nested(boxes, nested_threshold)
+        for label, bbox in boxes:
+            color = _COLORS[label]
+            rect = pymupdf.Rect(*bbox)
+            page.draw_rect(rect, color=color, width=1.2)
+            page.insert_text((rect.x0, max(rect.y0 - 3, 0)), label, color=color, fontsize=7)
+            total_boxes += 1
+        total_gap_filled += len(gaps)
+        print(
+            f"    page {page_number}/{doc.page_count}: {len(boxes)} box(es) "
+            f"({len(gaps)} gap-filled)",
+            file=sys.stderr,
+        )
+
+    title = "layout box legend (V2+V3 merged, LLM-arbitrated + VLM gap-fill)"
+    if suppress_nested:
+        title += ", nested boxes suppressed"
+    _insert_legend_page(doc, title=title)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{path.stem}_merged.pdf"
+    doc.save(str(out_path))
+    page_count = doc.page_count - 1  # 범례 페이지 제외
+    doc.close()
+    print(
+        f"  wrote {out_path} ({total_boxes} boxes across {page_count} pages, "
+        f"{total_gap_filled} gap-filled)",
+        file=sys.stderr,
+    )
+    return out_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("files", nargs="+", help="pdf/docx/pptx/doc/ppt 파일 경로들")
@@ -456,6 +689,15 @@ def main() -> None:
         default=0.8,
         help="--suppress-nested의 포함 비율 임계값(0~1, 기본 0.8)",
     )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="V2+V3 병합 버전(<파일명>_merged.pdf)도 만듦 -- 겹치는 영역은 "
+        "라벨 같으면 score 높은 쪽, 다르면 페이지당 LLM 호출 1회로 판정, "
+        "어느 쪽도 못 잡은 영역은 VLM 전체 감지 결과에서 보간. V2/V3/VLM을 "
+        "전부 내부적으로 다시 돌리므로(--skip-v2/v3/vlm과 무관) 비용/시간이"
+        " 제일 큼",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -470,6 +712,9 @@ def main() -> None:
         if not args.skip_vlm:
             print(f"processing {path} (VLM)...", file=sys.stderr)
             render_vlm(path, out_dir, args.suppress_nested, args.nested_threshold)
+        if args.merge:
+            print(f"processing {path} (merged V2+V3+VLM)...", file=sys.stderr)
+            render_merged(path, out_dir, args.suppress_nested, args.nested_threshold)
 
 
 if __name__ == "__main__":
