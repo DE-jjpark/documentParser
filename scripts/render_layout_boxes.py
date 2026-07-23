@@ -111,14 +111,25 @@ def render(path: Path, out_dir: Path) -> Path:
     return out_path
 
 
+# bbox 정확도 보정: VLM은 좌표를 맨눈 추측으로 답하면 부정확하다(실측
+# 확인: PP-DocLayoutV2 대비 훨씬 성기고 어긋난 박스). 이미지에 0~1000
+# 좌표 눈금 격자를 미리 그려서 보내면(grid-overlay grounding 기법) VLM이
+# 실제로 이미지에 찍힌 숫자를 읽어서 답할 수 있어 훨씬 정확해진다 --
+# _grid_overlay_png()가 이 격자 이미지를 만들고, 최종 출력 PDF(원본
+# page 객체)에는 격자를 안 남긴다(별도 스크래치 문서에만 그림).
+_GRID_STEP = 50
+
 _VLM_LAYOUT_PROMPT = (
     "이 페이지 이미지 안의 레이아웃 영역을 전부 감지해줘. 각 영역마다 카테고리와 "
     "위치(bounding box)를 알려줘. 카테고리는 반드시 다음 중에서만 골라라: "
     f"{', '.join(sorted(ALL_LABELS))}.\n\n"
-    "좌표는 이미지 전체 가로/세로를 각각 0~1000으로 정규화한 값(왼쪽 위가 "
-    "(0,0), 오른쪽 아래가 (1000,1000))으로 줘.\n\n"
+    "이미지 위에 회색 좌표 격자가 그려져 있다 -- 위쪽 가장자리 숫자가 x좌표, "
+    f"왼쪽 가장자리 숫자가 y좌표다({_GRID_STEP} 단위 눈금, 왼쪽 위가 (0,0), "
+    "오른쪽 아래가 (1000,1000)). 이 눈금을 실제로 읽어서 각 영역의 경계가 "
+    "어느 눈금 근처인지 최대한 정확히 맞춰 답해라 -- 대충 짐작하지 말 것.\n\n"
     "답변은 반드시 JSON 배열 하나만 출력해라(다른 설명 문장 없이). 각 원소는 "
-    '{"label": "<카테고리>", "bbox": [x0, y0, x1, y1]} 형식이다.'
+    '{"label": "<카테고리>", "bbox": [x0, y0, x1, y1]} 형식이다(x0,y0,x1,y1 '
+    "모두 0~1000 사이 정규화 좌표)."
 )
 
 _JSON_ARRAY = re.compile(r"\[[\s\S]*\]")
@@ -157,20 +168,43 @@ def _parse_vlm_boxes(text: str) -> list[tuple[str, tuple[float, float, float, fl
     return boxes
 
 
+def _grid_overlay_png(page: pymupdf.Page) -> tuple[bytes, int, int]:
+    """page 자체는 안 건드리고(최종 출력 PDF에 격자가 남으면 안 되므로)
+    별도 스크래치 문서에 페이지를 복사해 그 위에만 0~1000 좌표 격자를
+    그린다."""
+    scratch = pymupdf.open()
+    scratch.insert_pdf(page.parent, from_page=page.number, to_page=page.number)
+    grid_page = scratch[0]
+    rect = grid_page.rect
+    gray = (0.6, 0.6, 0.6)
+    for v in range(0, 1001, _GRID_STEP):
+        x = rect.width * v / 1000
+        y = rect.height * v / 1000
+        grid_page.draw_line((x, 0), (x, rect.height), color=gray, width=0.3)
+        grid_page.draw_line((0, y), (rect.width, y), color=gray, width=0.3)
+        grid_page.insert_text((x + 1, 8), str(v), color=(0.8, 0, 0), fontsize=5)
+        grid_page.insert_text((1, y + 5), str(v), color=(0.8, 0, 0), fontsize=5)
+    pix = grid_page.get_pixmap(dpi=RENDER_DPI)
+    png_bytes = pix.tobytes("png")
+    width, height = pix.width, pix.height
+    scratch.close()
+    return png_bytes, width, height
+
+
 def _vlm_boxes_for_page(
     client, page: pymupdf.Page
 ) -> list[tuple[str, tuple[float, float, float, float]]]:
-    pix = page.get_pixmap(dpi=RENDER_DPI)
-    result = caption_with_hard_timeout(client, pix.tobytes("png"), _VLM_LAYOUT_PROMPT)
+    grid_png, width, height = _grid_overlay_png(page)
+    result = caption_with_hard_timeout(client, grid_png, _VLM_LAYOUT_PROMPT)
     normalized = _parse_vlm_boxes(result.text)
 
     boxes: list[tuple[str, tuple[float, float, float, float]]] = []
     for label, (x0, y0, x1, y1) in normalized:
         px_bbox = (
-            x0 / 1000 * pix.width,
-            y0 / 1000 * pix.height,
-            x1 / 1000 * pix.width,
-            y1 / 1000 * pix.height,
+            x0 / 1000 * width,
+            y0 / 1000 * height,
+            x1 / 1000 * width,
+            y1 / 1000 * height,
         )
         boxes.append((label, px_to_pt(px_bbox)))
     return boxes
