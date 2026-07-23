@@ -186,24 +186,12 @@ def _assign_heading_levels(elements: list[DocumentElement]) -> list[DocumentElem
 _HEADING_STRATEGIES = ("font_size", "llm", "llm_categorized")
 
 
-def load(
-    data: bytes,
-    source: str,
-    tier: str = "balanced",
-    heading_strategy: str = "font_size",
-) -> list[DocumentElement]:
-    """``heading_strategy``: "font_size"(기본, _assign_heading_levels) /
-    "llm"(heading_llm.assign_heading_levels_llm, block_type은 참고용 힌트) /
-    "llm_categorized"(heading_llm.assign_heading_levels_llm_categorized,
-    doc_title/paragraph_title/figure_title을 구조적으로 다른 역할로 프롬프트에
-    못박음) -- 셋 중 뭐가 실제 문서에서 더 정확한 계층 구조를 뽑는지 비교
-    평가하기 위한 병렬 경로들. loaders 레지스트리(parsing/loaders/__init__.py)
-    의 공통 시그니처(tier까지)에는 아직 안 실었다 -- CLI/엔진까지 배선하는 건
-    비교가 끝난 뒤에 결정."""
-    if heading_strategy not in _HEADING_STRATEGIES:
-        raise ValueError(
-            f"unknown heading_strategy {heading_strategy!r}; expected one of {_HEADING_STRATEGIES}"
-        )
+def _extract_raw_elements(data: bytes, tier: str) -> list[DocumentElement]:
+    """레이아웃 분석 → 라우팅 → native/vlm 조합 → 병합 → 표 연결 힌트까지,
+    heading 레벨 배정(_assign_heading_levels 등) 이전 단계. load()와
+    scripts/compare_heading_strategies.py가 같이 쓴다 -- 세 heading_strategy
+    를 비교할 때 이 비싼 단계(특히 VLM 그림/표 캡션 호출)를 매번 다시
+    돌리지 않고 한 번만 실행해서 결과를 재사용하려는 목적."""
     try:
         import pymupdf
     except ImportError as exc:
@@ -233,7 +221,18 @@ def load(
                 }
             )
             elements.extend(result["elements"])
-    elements = _flag_continued_tables(elements)
+    return _flag_continued_tables(elements)
+
+
+def assign_heading_levels(
+    elements: list[DocumentElement], heading_strategy: str
+) -> list[DocumentElement]:
+    """_extract_raw_elements()가 만든 elements에 heading_strategy에 맞는
+    레벨 배정 함수를 적용한다 -- load()와 비교 스크립트가 공유하는 분기점."""
+    if heading_strategy not in _HEADING_STRATEGIES:
+        raise ValueError(
+            f"unknown heading_strategy {heading_strategy!r}; expected one of {_HEADING_STRATEGIES}"
+        )
     if heading_strategy == "llm":
         from document_parser.parsing.loaders.pdf.heading_llm import assign_heading_levels_llm
 
@@ -245,3 +244,25 @@ def load(
 
         return assign_heading_levels_llm_categorized(elements)
     return _assign_heading_levels(elements)
+
+
+def load(
+    data: bytes,
+    source: str,
+    tier: str = "balanced",
+    heading_strategy: str = "font_size",
+) -> list[DocumentElement]:
+    """``heading_strategy``: "font_size"(기본, _assign_heading_levels) /
+    "llm"(heading_llm.assign_heading_levels_llm, block_type은 참고용 힌트) /
+    "llm_categorized"(heading_llm.assign_heading_levels_llm_categorized,
+    doc_title/paragraph_title/figure_title을 구조적으로 다른 역할로 프롬프트에
+    못박음) -- 셋 중 뭐가 실제 문서에서 더 정확한 계층 구조를 뽑는지 비교
+    평가하기 위한 병렬 경로들. loaders 레지스트리(parsing/loaders/__init__.py)
+    의 공통 시그니처(tier까지)에는 아직 안 실었다 -- CLI/엔진까지 배선하는 건
+    비교가 끝난 뒤에 결정."""
+    if heading_strategy not in _HEADING_STRATEGIES:
+        raise ValueError(
+            f"unknown heading_strategy {heading_strategy!r}; expected one of {_HEADING_STRATEGIES}"
+        )
+    elements = _extract_raw_elements(data, tier)
+    return assign_heading_levels(elements, heading_strategy)

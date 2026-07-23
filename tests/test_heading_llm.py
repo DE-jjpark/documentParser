@@ -4,6 +4,7 @@
 을 모듈 레벨에서 mock한다 -- 프롬프트 배선과 응답 파싱만 확인.
 """
 
+import re
 from unittest.mock import patch
 
 from document_parser.core.models import DocumentElement, ElementType
@@ -44,6 +45,28 @@ def test_assigns_levels_from_valid_json_response():
     assert [el.metadata["level"] for el in result] == [1, 2, 3]
     assert all(el.metadata["level_source"] == "llm" for el in result)
     mock_complete.assert_called_once()
+
+
+def test_prompt_collapses_embedded_newlines_to_keep_one_line_per_item():
+    """실측 회귀 테스트: 제목 텍스트에 줄바꿈이 있으면(여러 줄짜리 슬라이드
+    표지 제목 등) "번호 하나 = 한 줄" 형식이 깨져서 LLM이 항목 개수를
+    잘못 세고 응답 길이가 안 맞아 전체가 실패했다(117개 입력에 118개 응답)."""
+    elements = [
+        _heading("Line one\nLine two\n  Line three  "),
+        _heading("Next item"),
+    ]
+
+    with patch(
+        "document_parser.parsing.loaders.pdf.heading_llm.complete_text_with_hard_timeout",
+        return_value=VLMCaptionResult(text="[1, 2]"),
+    ) as mock_complete:
+        with patch("document_parser.parsing.loaders.pdf.heading_llm.get_client"):
+            assign_heading_levels_llm(elements)
+
+    prompt = mock_complete.call_args.args[1]
+    assert "Line one Line two Line three" in prompt
+    item_lines = [line for line in prompt.splitlines() if re.match(r"^\d+\. \(p\.", line)]
+    assert len(item_lines) == 2
 
 
 def test_prompt_includes_heading_text_page_and_block_type():

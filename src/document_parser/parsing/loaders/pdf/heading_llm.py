@@ -72,7 +72,12 @@ def _build_prompt(headings: list[DocumentElement], header: str = _PROMPT_HEADER)
     lines = [header, ""]
     for i, el in enumerate(headings, start=1):
         block_type = el.metadata.get("block_type", "unknown")
-        lines.append(f"{i}. (p.{el.page}, {block_type}) {el.text}")
+        # 제목 텍스트에 줄바꿈이 섞여 있으면(실측: 여러 줄짜리 슬라이드 표지
+        # 제목) "번호 하나 = 한 줄" 형식이 깨져서 LLM이 항목 개수를 잘못 세고,
+        # 응답 배열 길이가 안 맞아 _parse_levels가 통째로 실패한다(실측 확인:
+        # 117개 입력에 118개짜리 응답이 옴) -- 한 줄로 접어서 방지한다.
+        text = " ".join(el.text.split())
+        lines.append(f"{i}. (p.{el.page}, {block_type}) {text}")
     return "\n".join(lines)
 
 
