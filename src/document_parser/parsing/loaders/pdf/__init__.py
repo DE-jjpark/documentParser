@@ -183,7 +183,24 @@ def _assign_heading_levels(elements: list[DocumentElement]) -> list[DocumentElem
     return result
 
 
-def load(data: bytes, source: str, tier: str = "balanced") -> list[DocumentElement]:
+_HEADING_STRATEGIES = ("font_size", "llm")
+
+
+def load(
+    data: bytes,
+    source: str,
+    tier: str = "balanced",
+    heading_strategy: str = "font_size",
+) -> list[DocumentElement]:
+    """``heading_strategy``: "font_size"(기본, _assign_heading_levels) 또는
+    "llm"(heading_llm.assign_heading_levels_llm) -- 둘 중 뭐가 실제 문서에서
+    더 정확한 계층 구조를 뽑는지 비교 평가하기 위한 병렬 경로. loaders 레지스트리
+    (parsing/loaders/__init__.py)의 공통 시그니처(tier까지)에는 아직 안 실었다
+    -- CLI/엔진까지 배선하는 건 비교가 끝난 뒤에 결정."""
+    if heading_strategy not in _HEADING_STRATEGIES:
+        raise ValueError(
+            f"unknown heading_strategy {heading_strategy!r}; expected one of {_HEADING_STRATEGIES}"
+        )
     try:
         import pymupdf
     except ImportError as exc:
@@ -214,4 +231,8 @@ def load(data: bytes, source: str, tier: str = "balanced") -> list[DocumentEleme
             )
             elements.extend(result["elements"])
     elements = _flag_continued_tables(elements)
+    if heading_strategy == "llm":
+        from document_parser.parsing.loaders.pdf.heading_llm import assign_heading_levels_llm
+
+        return assign_heading_levels_llm(elements)
     return _assign_heading_levels(elements)

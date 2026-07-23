@@ -137,3 +137,15 @@ class VLMClient:
         )
         usage = response.usage.model_dump() if response.usage is not None else None
         return VLMCaptionResult(text=response.choices[0].message.content, usage=usage)
+
+    def complete_text(self, prompt: str) -> VLMCaptionResult:
+        """이미지 없는 순수 텍스트 프롬프트 — heading_llm.py(LLM 기반 제목
+        계층 구조 추정)처럼 비전이 필요 없는 호출용. 같은 게이트웨이/모델을
+        그대로 재사용한다(caption_image와 별도 클라이언트를 안 둠)."""
+        response = self._client.chat.completions.create(
+            model=self._model,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        usage = response.usage.model_dump() if response.usage is not None else None
+        return VLMCaptionResult(text=response.choices[0].message.content, usage=usage)

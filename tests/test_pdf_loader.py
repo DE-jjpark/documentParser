@@ -945,3 +945,55 @@ def test_assign_heading_levels_font_size_fallback_clusters_and_caps():
     assert levels["C"] == 3
     assert levels["D"] == levels["E"] == levels["F"] == levels["G"] == 4
     assert max(levels.values()) <= 5
+
+
+def test_load_rejects_unknown_heading_strategy():
+    from document_parser.parsing.loaders import pdf as pdf_module
+
+    with pytest.raises(ValueError, match="heading_strategy"):
+        pdf_module.load(b"irrelevant", "doc.pdf", heading_strategy="vibes")
+
+
+def _one_page_pdf_with_heading() -> bytes:
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "A Heading", fontsize=24)
+    return doc.tobytes()
+
+
+def test_load_default_heading_strategy_uses_font_size_path():
+    from document_parser.parsing.loaders import pdf as pdf_module
+
+    with (
+        patch(
+            "document_parser.parsing.loaders.pdf._assign_heading_levels",
+            side_effect=lambda els: els,
+        ) as mock_font_size,
+        patch(
+            "document_parser.parsing.loaders.pdf.heading_llm.assign_heading_levels_llm"
+        ) as mock_llm,
+    ):
+        pdf_module.load(_one_page_pdf_with_heading(), "doc.pdf", tier="fast")
+
+    mock_font_size.assert_called_once()
+    mock_llm.assert_not_called()
+
+
+def test_load_llm_heading_strategy_uses_llm_path():
+    from document_parser.parsing.loaders import pdf as pdf_module
+
+    with (
+        patch(
+            "document_parser.parsing.loaders.pdf._assign_heading_levels",
+        ) as mock_font_size,
+        patch(
+            "document_parser.parsing.loaders.pdf.heading_llm.assign_heading_levels_llm",
+            side_effect=lambda els: els,
+        ) as mock_llm,
+    ):
+        pdf_module.load(
+            _one_page_pdf_with_heading(), "doc.pdf", tier="fast", heading_strategy="llm"
+        )
+
+    mock_llm.assert_called_once()
+    mock_font_size.assert_not_called()
