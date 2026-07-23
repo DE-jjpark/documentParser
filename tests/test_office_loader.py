@@ -8,6 +8,7 @@ python-docx 같은 외부 라이브러리 없이, zipfile로 최소한의 유효
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import zipfile
 
@@ -34,6 +35,15 @@ requires_libreoffice = pytest.mark.skipif(
 # 없이) 'pdf' extra만 있으면 된다.
 requires_pdf_extra = pytest.mark.skipif(
     not _HAS_PYMUPDF, reason="'pdf' extra(pymupdf)가 없음 -- 이미지 위치 매칭 테스트 불가"
+)
+
+# 노트 슬라이드만 있고 본문 도형에 위치 정보(xfrm)가 없는 이 테스트용 pptx는
+# LibreOffice 변환 후 텍스트 레이어가 없는 페이지가 되어 route_page가
+# "vlm_only"로 보낸다(layout.py 참고, AzureDI 제거 이후 스캔 페이지는 VLM이
+# 전담) -- 그래서 이 테스트도 실제 VLM 자격증명이 있어야 끝까지 돈다.
+requires_real_vlm = pytest.mark.skipif(
+    not (os.environ.get("DATABRICKS_HOST") and os.environ.get("DATABRICKS_TOKEN")),
+    reason="DATABRICKS_HOST / DATABRICKS_TOKEN 환경변수 필요 (실제 in4u AI Gateway 호출)",
 )
 
 _CONTENT_TYPES = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -390,6 +400,7 @@ def test_docx_comment_without_matching_element_has_no_position():
 
 
 @requires_libreoffice
+@requires_real_vlm
 def test_pptx_notes_appear_as_note_elements_after_full_conversion(engine):
     data = _minimal_pptx_with_note("Slide One", "Speaker note for slide one")
 
