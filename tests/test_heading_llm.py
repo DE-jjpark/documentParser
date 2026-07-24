@@ -184,7 +184,7 @@ def test_categorized_assigns_levels_and_tags_level_source():
 
 
 def test_categorized_prompt_spells_out_role_per_block_type():
-    """"llm"과 다르게 block_type을 참고용 힌트가 아니라 구조적 전제로
+    """ "llm"과 다르게 block_type을 참고용 힌트가 아니라 구조적 전제로
     못박아야 한다 -- 세 카테고리 각각에 대한 명시적 판단 규칙이 프롬프트에
     있는지 확인."""
     elements = [_heading("Title", block_type="doc_title")]

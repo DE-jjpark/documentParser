@@ -101,9 +101,7 @@ def test_complete_text_sends_plain_text_message_without_image(monkeypatch):
 
     assert result.text == "[1, 2, 1]"
     call_kwargs = mock_openai_client.return_value.chat.completions.create.call_args.kwargs
-    assert call_kwargs["messages"] == [
-        {"role": "user", "content": "classify these headings"}
-    ]
+    assert call_kwargs["messages"] == [{"role": "user", "content": "classify these headings"}]
 
 
 def test_langsmith_tracing_disabled_by_default(monkeypatch):

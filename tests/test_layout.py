@@ -83,11 +83,7 @@ def test_analyze_page_onnx_uses_model_result_when_available():
     try:
         mock_model = MagicMock()
         mock_model.predict.return_value = [
-            {
-                "boxes": [
-                    {"label": "text", "coordinate": [0, 0, 10, 10], "cls_id": 22, "order": 1}
-                ]
-            }
+            {"boxes": [{"label": "text", "coordinate": [0, 0, 10, 10], "cls_id": 22, "order": 1}]}
         ]
         with patch(
             "document_parser.parsing.loaders.pdf.layout._get_model_onnx",
