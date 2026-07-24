@@ -14,12 +14,24 @@ OpenAI 호환 형식이라 openai SDK를 base_url만 바꿔서 그대로 쓴다 
 api_key를 그대로 Authorization: Bearer 헤더로 써주므로 google-genai 때처럼
 헤더를 직접 손볼 필요가 없다.
 
-필요 환경변수:
+필요 환경변수(VLM_PROVIDER="databricks", 기본값):
   DATABRICKS_HOST   예) adb-1017423463570685.5.azuredatabricks.net
   DATABRICKS_TOKEN  model-serving + ai-gateway 스코프가 있는 토큰
   DATABRICKS_VLM_MODEL  Unity Catalog 모델 경로 (기본값: 지금 확인된
                         skep_parser.skep-parser-test.parser-test-sn-4-6 —
                         테스트용 이름이라 나중에 프로덕션 배포로 바뀔 수 있음)
+
+VLM_PROVIDER="azure"(로컬/Luna처럼 Azure OpenAI Service로 직접 서빙되는
+경우 -- Databricks AI Gateway를 거치지 않음): openai SDK의 AzureOpenAI
+클라이언트를 쓴다. 아래 이름은 openai SDK가 자동으로 읽는 표준 환경변수라
+코드에서 따로 안 읽어도 된다(AzureOpenAI()가 알아서 찾음) -- 새 provider
+추가할 때 이 셋만 채우면 됨:
+  AZURE_OPENAI_ENDPOINT       예) https://<리소스>.openai.azure.com
+  AZURE_OPENAI_API_KEY
+  OPENAI_API_VERSION          예) 2026-01-01-preview (Azure 쪽 배포 버전)
+  AZURE_OPENAI_VLM_DEPLOYMENT  배포(deployment) 이름 -- model 파라미터로 씀
+                               (Azure OpenAI는 모델명이 아니라 배포 이름을
+                               받으므로 DATABRICKS_VLM_MODEL과 의미가 다름)
 
 LangSmith 트레이싱(선택): 200개 문서 배치를 돌릴 때 어느 VLM 호출이 실제로
 느린지/실패하는지 직접 확인할 수 있게, LANGCHAIN_TRACING_V2=true일 때만
@@ -77,31 +89,57 @@ class VLMCaptionResult:
 class VLMClient:
     def __init__(self, model: str | None = None) -> None:
         try:
-            from openai import OpenAI
+            from openai import AzureOpenAI, OpenAI
         except ImportError as exc:
             raise MissingDependencyError(
                 "VLM support requires the 'vlm' extra: pip install 'document-parser[vlm]'"
             ) from exc
 
-        host = os.environ.get("DATABRICKS_HOST")
-        token = os.environ.get("DATABRICKS_TOKEN")
-        if not host or not token:
-            raise MissingDependencyError(
-                "DATABRICKS_HOST / DATABRICKS_TOKEN environment variables are required"
-            )
-
-        self._model = model or os.environ.get("DATABRICKS_VLM_MODEL", DEFAULT_MODEL)
         # openai SDK 기본값(10분 타임아웃 + 재시도 2회)은 게이트웨이가 느려질 때
         # 호출 하나가 30분 가까이 걸릴 수 있다는 걸 200개 문서 배치 실행 중
         # 실제로 발견해서(요청 하나가 39분 걸림), 훨씬 짧은 값으로 낮췄다 —
         # 응답이 느린 호출은 이 실패를 감수하고 넘어가는 게, 배치 전체가
-        # 그 한 호출 때문에 몇십 분씩 막히는 것보다 낫다.
-        client = OpenAI(
-            api_key=token,
-            base_url=f"https://{host}/{_AI_GATEWAY_PATH}",
-            timeout=60.0,
-            max_retries=1,
-        )
+        # 그 한 호출 때문에 몇십 분씩 막히는 것보다 낫다. provider 둘 다 동일.
+        provider = os.environ.get("VLM_PROVIDER", "databricks").lower()
+        if provider == "azure":
+            endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+            api_key = os.environ.get("AZURE_OPENAI_API_KEY")
+            if not endpoint or not api_key:
+                raise MissingDependencyError(
+                    "AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY environment "
+                    "variables are required (VLM_PROVIDER=azure)"
+                )
+            self._model = model or os.environ.get("AZURE_OPENAI_VLM_DEPLOYMENT")
+            if not self._model:
+                raise MissingDependencyError(
+                    "AZURE_OPENAI_VLM_DEPLOYMENT environment variable is required "
+                    "(VLM_PROVIDER=azure) -- Azure OpenAI는 모델명이 아니라 배포 "
+                    "이름을 받는다"
+                )
+            # endpoint/api_key/api_version은 AzureOpenAI()가 각각 AZURE_OPENAI_
+            # ENDPOINT/AZURE_OPENAI_API_KEY/OPENAI_API_VERSION 환경변수를 자동
+            # 으로 읽으므로 여기서 굳이 다시 안 넘겨도 되지만, MissingDependency
+            # Error로 먼저 검증하고 싶어서 명시적으로 읽어 그대로 전달한다.
+            client = AzureOpenAI(
+                azure_endpoint=endpoint,
+                api_key=api_key,
+                timeout=60.0,
+                max_retries=1,
+            )
+        else:
+            host = os.environ.get("DATABRICKS_HOST")
+            token = os.environ.get("DATABRICKS_TOKEN")
+            if not host or not token:
+                raise MissingDependencyError(
+                    "DATABRICKS_HOST / DATABRICKS_TOKEN environment variables are required"
+                )
+            self._model = model or os.environ.get("DATABRICKS_VLM_MODEL", DEFAULT_MODEL)
+            client = OpenAI(
+                api_key=token,
+                base_url=f"https://{host}/{_AI_GATEWAY_PATH}",
+                timeout=60.0,
+                max_retries=1,
+            )
         from langsmith.utils import tracing_is_enabled
 
         # LANGSMITH_TRACING(신규 명칭)과 LANGCHAIN_TRACING_V2(구 명칭) 둘 다

@@ -18,9 +18,62 @@ from document_parser.parsing.clients.vlm import VLMClient  # noqa: E402
 def test_missing_env_vars_raises(monkeypatch):
     monkeypatch.delenv("DATABRICKS_HOST", raising=False)
     monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)
+    monkeypatch.delenv("VLM_PROVIDER", raising=False)
 
     with pytest.raises(MissingDependencyError, match="DATABRICKS"):
         VLMClient()
+
+
+def test_azure_provider_missing_env_vars_raises(monkeypatch):
+    monkeypatch.setenv("VLM_PROVIDER", "azure")
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(MissingDependencyError, match="AZURE_OPENAI"):
+        VLMClient()
+
+
+def test_azure_provider_missing_deployment_raises(monkeypatch):
+    """Azure OpenAI는 모델명이 아니라 배포(deployment) 이름을 받으므로
+    DATABRICKS_VLM_MODEL과 별도로 이게 없으면 못 넘어간다."""
+    monkeypatch.setenv("VLM_PROVIDER", "azure")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://luna.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "fake-key")
+    monkeypatch.delenv("AZURE_OPENAI_VLM_DEPLOYMENT", raising=False)
+
+    with pytest.raises(MissingDependencyError, match="AZURE_OPENAI_VLM_DEPLOYMENT"):
+        VLMClient()
+
+
+def test_azure_provider_builds_azure_openai_client(monkeypatch):
+    monkeypatch.setenv("VLM_PROVIDER", "azure")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://luna.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "fake-key")
+    monkeypatch.setenv("AZURE_OPENAI_VLM_DEPLOYMENT", "luna-vlm-deployment")
+
+    mock_message = MagicMock()
+    mock_message.content = "described via azure"
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock(message=mock_message)]
+    mock_response.usage = None
+
+    with (
+        patch("openai.AzureOpenAI") as mock_azure_client,
+        patch("langsmith.utils.tracing_is_enabled", return_value=False),
+    ):
+        mock_azure_client.return_value.chat.completions.create.return_value = mock_response
+        client = VLMClient()
+        result = client.caption_image(b"fake-png-bytes", "describe this")
+
+    mock_azure_client.assert_called_once_with(
+        azure_endpoint="https://luna.openai.azure.com",
+        api_key="fake-key",
+        timeout=60.0,
+        max_retries=1,
+    )
+    assert result.text == "described via azure"
+    call_kwargs = mock_azure_client.return_value.chat.completions.create.call_args.kwargs
+    assert call_kwargs["model"] == "luna-vlm-deployment"
 
 
 def test_caption_image_returns_response_text(monkeypatch):
