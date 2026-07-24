@@ -3,7 +3,7 @@ name = "document-parser"
 version = "0.1.1"
 description = "A document parsing toolkit"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "langgraph>=0.4",
     "pydantic>=2.7",
@@ -30,11 +30,15 @@ api = [
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",
 ]
-azure = [
-    "azure-ai-documentintelligence>=1.0.0",
-]
 vlm = [
     "openai>=1.0",
+]
+# 현재 파싱 파이프라인은 AzureDI를 호출하지 않는다(표 구조 추출/스캔 페이지
+# 본문 모두 VLM으로 대체 — pdf/graph.py, pdf/vlm.py 참고). azure_di.py와
+# 클라이언트 코드 자체는 남겨뒀다(재검토 가능성) — 이 extra는 그 코드가
+# import될 때 필요한 SDK만 제공한다.
+azure = [
+    "azure-ai-documentintelligence>=1.0.0",
 ]
 
 [project.scripts]
@@ -73,7 +77,7 @@ layers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

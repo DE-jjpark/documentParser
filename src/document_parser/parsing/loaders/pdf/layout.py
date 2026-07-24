@@ -11,6 +11,14 @@ PP-DocLayoutV2를 실제로 돌리려면 paddlepaddle이 추가로 필요한데,
 표준 인덱스가 아니라 전용 인덱스에서 받아야 한다(pyproject.toml의 'layout'
 extra 주석 참고) — 공급망 검토는 보류, 팀 결정에 따라 가중치를 미리 받아
 가는 방식으로 우선 진행.
+
+analyze_page_onnx()/_get_model_onnx(): paddlepaddle(~195MB) 대신 paddlex의
+HPI 플러그인(ultra-infer-python, ~71MB, PyPI 의존성만)으로 onnxruntime
+백엔드를 쓰는 병렬 경로 -- 오프라인 배포(Databricks) 번들 용량을 줄이려는
+목적으로 추가했다. paddle 의존성이 실제로 없는지는 코드/의존성 메타데이터
+로 확인했지만, 이 플러그인이 linux 전용 wheel이라 로컬(macOS)에서 끝까지
+돌려 정확도까지 검증하지는 못했다 -- 실제 검증은 linux 배포 환경에서 필요.
+아직 analyze_page()를 대체하지 않는다(라우팅에 안 실림).
 """
 
 from __future__ import annotations
@@ -63,7 +71,7 @@ ALL_LABELS = (
 )
 
 # 25개 중 "순수 텍스트 추출(pymupdf)만으로는 부족한" 카테고리 — has_figures
-# 판정과 VLM/AzureDI 크롭 대상 결정에 쓴다. 원래는 그림류만 포함했는데(그림은
+# 판정과 VLM 크롭 대상 결정에 쓴다. 원래는 그림류만 포함했는데(그림은
 # pymupdf로 텍스트를 뽑을 수 없으니 당연), "표는 plumber(pymupdf) 텍스트
 # 추출이 아니라 VLM/DI로 보내기로 했다"는 설계 결정에 따라 table도 여기
 # 포함시켰다 — 표는 pymupdf로 글자는 뽑을 수 있어도 행/열/병합 구조를 못
@@ -113,15 +121,11 @@ class LayoutBox:
 class PageLayout:
     has_figures: bool
     has_text_layer: bool
-    # has_figures와 별도로 두는 이유: AzureDI는 이제 "표 구조만" 뽑는 용도라
-    # (route_page 참고), 표가 없고 이미지·차트만 있는 페이지에서 DI를 태우면
-    # 매칭될 표 자체가 없어 완전히 헛수고(불필요한 네트워크 호출·비용)다.
-    has_table: bool = False
     boxes: list[LayoutBox] = field(default_factory=list)  # 항상 읽기 순서로 정렬돼 있음
 
     @property
     def crop_boxes(self) -> list[LayoutBox]:
-        """그림류+표(_FIGURE_LABELS)만 골라낸 것 — VLM/AzureDI 크롭 대상.
+        """그림류+표(_FIGURE_LABELS)만 골라낸 것 — VLM 크롭 대상.
         boxes가 이미 읽기 순서로 정렬돼 있어 여러 개여도 순서가 유지된다."""
         return [b for b in self.boxes if b.label in _FIGURE_LABELS]
 
@@ -158,19 +162,7 @@ def _get_model():
     return LayoutDetection(model_name="PP-DocLayoutV2", model_dir=str(model_dir))
 
 
-def analyze_page(page: pymupdf.Page) -> PageLayout:
-    has_text_layer = bool(page.get_text().strip())
-
-    try:
-        model = _get_model()
-    except ImportError:
-        return _analyze_page_heuristic(page, has_text_layer)
-
-    pix = page.get_pixmap(dpi=RENDER_DPI)
-    with tempfile.NamedTemporaryFile(suffix=".png") as f:
-        pix.save(f.name)
-        (result,) = model.predict(f.name, batch_size=1, layout_nms=True)
-
+def _page_layout_from_predict_result(result, has_text_layer: bool) -> PageLayout:
     boxes = _sort_boxes(
         [
             LayoutBox(
@@ -186,18 +178,82 @@ def analyze_page(page: pymupdf.Page) -> PageLayout:
     return PageLayout(
         has_figures=any(b.label in _FIGURE_LABELS for b in boxes),
         has_text_layer=has_text_layer,
-        has_table=any(b.label == "table" for b in boxes),
         boxes=boxes,
     )
+
+
+def analyze_page(page: pymupdf.Page) -> PageLayout:
+    has_text_layer = bool(page.get_text().strip())
+
+    try:
+        model = _get_model()
+    except ImportError:
+        return _analyze_page_heuristic(page, has_text_layer)
+
+    pix = page.get_pixmap(dpi=RENDER_DPI)
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        pix.save(f.name)
+        (result,) = model.predict(f.name, batch_size=1, layout_nms=True)
+
+    return _page_layout_from_predict_result(result, has_text_layer)
+
+
+@lru_cache(maxsize=1)
+def _get_model_onnx():
+    """analyze_page()의 paddle 백엔드 대신 paddlex의 HPI(고성능 추론)
+    플러그인으로 PP-DocLayoutV2를 onnxruntime 백엔드로 돌린다 -- paddlepaddle
+    (~195MB, 별도 인덱스 필요) 대신 ultra-infer-python(~71MB, PyPI 표준
+    의존성만)만 있으면 되는 게 목적. 이 플러그인이 없으면(paddlex --install
+    hpi-cpu 미실행) DependencyError를 던진다 -- analyze_page_onnx()가
+    ImportError와 함께 잡아서 휴리스틱으로 폴백한다.
+
+    아직 라우팅(route_page)이나 pdf.load()의 기본 경로에는 안 실었다 --
+    실제 배포 환경(linux, Databricks)에서 정확도 검증 후 결정할 예정이라
+    별도 함수로만 둔다. 이 모듈은 macOS wheel이 없어 로컬(macOS)에서는
+    HPI 플러그인 자체를 설치할 수 없다 -- 정확도 검증은 linux 환경에서."""
+    import paddlex
+
+    model_dir = layout_model_dir()
+    if not any(model_dir.glob("*")):
+        raise MissingDependencyError(
+            f"PP-DocLayoutV2 weights not found at {model_dir} -- run "
+            "'document-parser download-models' first"
+        )
+    return paddlex.create_model(
+        "PP-DocLayoutV2",
+        model_dir=str(model_dir),
+        use_hpip=True,
+        hpi_config={"backend": "onnxruntime", "device_type": "cpu"},
+    )
+
+
+def analyze_page_onnx(page: pymupdf.Page) -> PageLayout:
+    """analyze_page()와 결과 형태는 동일하지만 onnxruntime(HPI) 백엔드를
+    쓴다 -- paddlepaddle 없이 돌리고 싶을 때의 병렬 경로(_get_model_onnx()
+    참고). 아직 프로덕션 라우팅에는 안 실려 있다."""
+    from paddlex.utils.deps import DependencyError
+
+    has_text_layer = bool(page.get_text().strip())
+
+    try:
+        model = _get_model_onnx()
+    except (ImportError, DependencyError):
+        return _analyze_page_heuristic(page, has_text_layer)
+
+    pix = page.get_pixmap(dpi=RENDER_DPI)
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        pix.save(f.name)
+        (result,) = model.predict(f.name)
+
+    return _page_layout_from_predict_result(result, has_text_layer)
 
 
 def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLayout:
     """'layout' extra가 없을 때 폴백: pymupdf 전용 휴리스틱.
 
     실제 25개 카테고리를 감지할 수 없으므로, 찾아낸 래스터 이미지는 그냥
-    "image" 라벨(25개 카탈로그 중 하나)로 표시해둔다 — 표는 원천적으로 감지
-    불가(has_table은 항상 False). 읽기 순서는 모르므로 order=None으로 두고
-    위치 기준 정렬에 맡긴다."""
+    "image" 라벨(25개 카탈로그 중 하나)로 표시해둔다. 읽기 순서는 모르므로
+    order=None으로 두고 위치 기준 정렬에 맡긴다."""
     images = page.get_images(full=True)
     boxes = _sort_boxes(
         [LayoutBox(label="image", bbox=tuple(page.get_image_bbox(img))) for img in images]
@@ -205,41 +261,33 @@ def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLay
     return PageLayout(
         has_figures=bool(boxes),
         has_text_layer=has_text_layer,
-        has_table=False,
         boxes=boxes,
     )
 
 
 def route_page(layout: PageLayout, tier: str = "balanced") -> str:
-    """페이지 라우팅 규칙 — 4분기(tier="fast"면 무조건 native).
+    """페이지 라우팅 규칙 — 3분기(tier="fast"면 무조건 native).
 
-    - tier="fast" → 무조건 native만. AzureDI/VLM 호출 자체를 안 한다 —
-      텍스트 레이어 없는(스캔) 페이지는 뽑을 방법이 없어 그대로 유실됨(감수).
+    AzureDI는 더 이상 쓰지 않는다 — 표를 포함해 native가 못 뽑는 모든 것을
+    VLM이 담당한다(표도 PP-DocLayoutV2의 _FIGURE_LABELS에 포함돼 있어 다른
+    그림·차트와 동일하게 크롭 후 VLM 캡션 경로를 탄다, vlm.py 참고).
+
+    - tier="fast" → 무조건 native만. VLM 호출 자체를 안 한다 — 텍스트 레이어
+      없는(스캔) 페이지는 뽑을 방법이 없어 그대로 유실됨(감수).
+    - 텍스트 레이어가 없음(스캔) → native(pdfplumber)로 뽑을 텍스트 자체가
+      없으므로, text_boxes(제목·본문 등)도 crop_boxes(그림·표)도 전부 박스
+      단위로 크롭해서 VLM에 보낸다 — DI가 하던 "페이지 전체 OCR" 역할을
+      PP-DocLayoutV2가 잡은 영역별 VLM 크롭으로 대신한다.
     - 텍스트 레이어가 있고 그림·표가 없음(순수 텍스트) → native만.
-    - 텍스트 레이어가 있고 표가 있음 → 순수 텍스트는 native가 이미 정확하게
-      뽑으니 그대로 두고, AzureDI는 "표 구조(HTML)만" 뽑는 용도로만 페이지
-      전체를 한 번 더 분석하고(문단 텍스트는 버림 — native와 중복), VLM은
-      그림 캡션 + 표 요약을 담당 — native+azure_di+vlm 셋 다 병렬 실행 후
-      병합(azure_di가 찾은 표와 VLM/PaddleX 표 박스는 bbox 겹침으로 매칭해서
-      하나의 표 요소로 합친다, graph.py의 merge 노드 참고).
-    - 텍스트 레이어가 있고 표는 없지만 다른 그림(이미지·차트 등)은 있음 →
-      AzureDI는 스킵 — DI의 역할이 이제 표 구조 추출뿐이라(has_table 참고),
-      표가 없으면 태워봤자 매칭될 게 없어 완전히 헛수고(불필요한 호출/비용).
-      native(텍스트) + vlm(그림 캡션)만 병렬 실행.
-    - 텍스트 레이어가 없음(스캔) → 원본 텍스트를 읽을 방법이 없으니 AzureDI가
-      페이지 전체(문단 텍스트 + 표 구조 둘 다) 분석 + VLM(그림 캡션/표 요약)
-      병렬 실행 후 병합 — 이 경우는 표 유무와 무관하게 항상 DI가 필요하다
-      (텍스트 자체를 DI로만 얻을 수 있어서).
+    - 텍스트 레이어가 있고 그림·표가 있음 → native(텍스트) + vlm(그림·표
+      캡션)만 병렬 실행.
 
-    반환값: "native" | "native_and_azure_di_and_vlm" | "native_and_vlm" |
-    "azure_di_and_vlm"
+    반환값: "native" | "native_and_vlm" | "vlm_only"
     """
     if tier == "fast":
         return "native"
     if not layout.has_text_layer:
-        return "azure_di_and_vlm"
-    if layout.has_table:
-        return "native_and_azure_di_and_vlm"
+        return "vlm_only"
     if layout.has_figures:
         return "native_and_vlm"
     return "native"

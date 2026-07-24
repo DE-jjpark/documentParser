@@ -6,6 +6,10 @@ dist/
 wheels/
 *.egg-info
 
+# 오프라인 설치 번들(scripts/build_offline_bundle.py 산출물) -- wheel/가중치
+# 바이너리라 git에 안 올린다. 대상 머신으로는 이 디렉터리를 직접 전송한다.
+offline_bundle/
+
 # Virtual environments
 .venv
 
@@ -13,3 +17,6 @@ wheels/
 .env
 .env.*
 !.env.example
+
+# scripts/render_layout_boxes.py 산출물(주석 단 PDF), git에 안 올림
+layout_boxes/

@@ -78,6 +78,32 @@ def test_caption_image_captures_token_usage(monkeypatch):
     assert result.usage == {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150}
 
 
+def test_complete_text_sends_plain_text_message_without_image(monkeypatch):
+    """complete_text()는 caption_image()와 같은 클라이언트/모델을 쓰되 이미지
+    블록 없이 순수 텍스트 content만 보내야 한다(heading_llm.py처럼 비전이
+    필요 없는 호출용)."""
+    monkeypatch.setenv("DATABRICKS_HOST", "adb-1017423463570685.5.azuredatabricks.net")
+    monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+
+    mock_message = MagicMock()
+    mock_message.content = "[1, 2, 1]"
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock(message=mock_message)]
+    mock_response.usage = None
+
+    with (
+        patch("openai.OpenAI") as mock_openai_client,
+        patch("langsmith.utils.tracing_is_enabled", return_value=False),
+    ):
+        mock_openai_client.return_value.chat.completions.create.return_value = mock_response
+        client = VLMClient()
+        result = client.complete_text("classify these headings")
+
+    assert result.text == "[1, 2, 1]"
+    call_kwargs = mock_openai_client.return_value.chat.completions.create.call_args.kwargs
+    assert call_kwargs["messages"] == [{"role": "user", "content": "classify these headings"}]
+
+
 def test_langsmith_tracing_disabled_by_default(monkeypatch):
     """tracing_is_enabled()가 False면 wrap_openai를 안 거치고 원본 클라이언트를
     그대로 쓴다 — 평소엔 langsmith 관련 오버헤드가 전혀 없다. langsmith 자체

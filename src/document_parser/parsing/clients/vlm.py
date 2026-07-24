@@ -30,7 +30,7 @@ openai 클라이언트를 langsmith.wrappers.wrap_openai()로 감싼다 — 매 
   LANGCHAIN_API_KEY=<LangSmith API 키>
   LANGCHAIN_PROJECT=<프로젝트 이름, 선택. 기본값 "default">
 설정 안 하면(LANGCHAIN_TRACING_V2 미설정/false) 기존과 동일하게 동작한다 —
-LangGraph 노드 자체(analyze/native/azure_di/vlm/merge)의 트레이싱도 같은
+LangGraph 노드 자체(analyze/native/vlm/vlm_text/merge)의 트레이싱도 같은
 환경변수만으로 LangGraph가 자동으로 처리하므로 이쪽엔 별도 코드가 없다.
 """
 
@@ -134,6 +134,18 @@ class VLMClient:
                     ],
                 }
             ],
+        )
+        usage = response.usage.model_dump() if response.usage is not None else None
+        return VLMCaptionResult(text=response.choices[0].message.content, usage=usage)
+
+    def complete_text(self, prompt: str) -> VLMCaptionResult:
+        """이미지 없는 순수 텍스트 프롬프트 — heading_llm.py(LLM 기반 제목
+        계층 구조 추정)처럼 비전이 필요 없는 호출용. 같은 게이트웨이/모델을
+        그대로 재사용한다(caption_image와 별도 클라이언트를 안 둠)."""
+        response = self._client.chat.completions.create(
+            model=self._model,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
         )
         usage = response.usage.model_dump() if response.usage is not None else None
         return VLMCaptionResult(text=response.choices[0].message.content, usage=usage)

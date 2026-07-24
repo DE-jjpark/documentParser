@@ -30,7 +30,7 @@ class ParsingEngine:
 
         ``source`` is a file path (read from disk when ``data`` is omitted) or
         just a name used for format detection and metadata when ``data`` is
-        passed directly. ``tier`` picks native-only ("fast", no AzureDI/VLM
+        passed directly. ``tier`` picks native-only ("fast", no VLM
         calls) vs the full pipeline ("balanced", default).
         """
         state = self._initial_state(source, data, format, tier)

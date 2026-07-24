@@ -73,6 +73,19 @@ def caption_with_hard_timeout(
         executor.shutdown(wait=False)
 
 
+def complete_text_with_hard_timeout(client: VLMClient, prompt: str) -> VLMCaptionResult:
+    """complete_text()용 caption_with_hard_timeout() 짝 함수 — 이미지가 없을
+    뿐 벽시계 상한을 강제하는 이유는 동일(위 HARD_TIMEOUT_SEC 설명 참고)."""
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(client.complete_text, prompt)
+    try:
+        return future.result(timeout=HARD_TIMEOUT_SEC)
+    except concurrent.futures.TimeoutError:
+        return VLMCaptionResult(text="", usage=None)
+    finally:
+        executor.shutdown(wait=False)
+
+
 @lru_cache(maxsize=1)
 def get_client() -> VLMClient:
     return VLMClient()

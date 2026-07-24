@@ -33,8 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tier",
         choices=[t.value for t in ParsingTier],
         default=ParsingTier.BALANCED.value,
-        help="'fast' = native/plumber only, no AzureDI/VLM calls; "
-        "'balanced' = full pipeline (default)",
+        help="'fast' = native/plumber only, no VLM calls; 'balanced' = full pipeline (default)",
     )
 
     ingest_cmd = subparsers.add_parser(
@@ -46,8 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tier",
         choices=[t.value for t in ParsingTier],
         default=ParsingTier.BALANCED.value,
-        help="'fast' = native/plumber only, no AzureDI/VLM calls; "
-        "'balanced' = full pipeline (default)",
+        help="'fast' = native/plumber only, no VLM calls; 'balanced' = full pipeline (default)",
     )
     ingest_cmd.add_argument("--strategy", default="recursive")
     ingest_cmd.add_argument("--chunk-size", type=int, default=1000)
