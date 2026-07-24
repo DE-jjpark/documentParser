@@ -11,6 +11,14 @@ PP-DocLayoutV2를 실제로 돌리려면 paddlepaddle이 추가로 필요한데,
 표준 인덱스가 아니라 전용 인덱스에서 받아야 한다(pyproject.toml의 'layout'
 extra 주석 참고) — 공급망 검토는 보류, 팀 결정에 따라 가중치를 미리 받아
 가는 방식으로 우선 진행.
+
+analyze_page_onnx()/_get_model_onnx(): paddlepaddle(~195MB) 대신 paddlex의
+HPI 플러그인(ultra-infer-python, ~71MB, PyPI 의존성만)으로 onnxruntime
+백엔드를 쓰는 병렬 경로 -- 오프라인 배포(Databricks) 번들 용량을 줄이려는
+목적으로 추가했다. paddle 의존성이 실제로 없는지는 코드/의존성 메타데이터
+로 확인했지만, 이 플러그인이 linux 전용 wheel이라 로컬(macOS)에서 끝까지
+돌려 정확도까지 검증하지는 못했다 -- 실제 검증은 linux 배포 환경에서 필요.
+아직 analyze_page()를 대체하지 않는다(라우팅에 안 실림).
 """
 
 from __future__ import annotations
@@ -154,19 +162,7 @@ def _get_model():
     return LayoutDetection(model_name="PP-DocLayoutV2", model_dir=str(model_dir))
 
 
-def analyze_page(page: pymupdf.Page) -> PageLayout:
-    has_text_layer = bool(page.get_text().strip())
-
-    try:
-        model = _get_model()
-    except ImportError:
-        return _analyze_page_heuristic(page, has_text_layer)
-
-    pix = page.get_pixmap(dpi=RENDER_DPI)
-    with tempfile.NamedTemporaryFile(suffix=".png") as f:
-        pix.save(f.name)
-        (result,) = model.predict(f.name, batch_size=1, layout_nms=True)
-
+def _page_layout_from_predict_result(result, has_text_layer: bool) -> PageLayout:
     boxes = _sort_boxes(
         [
             LayoutBox(
@@ -184,6 +180,72 @@ def analyze_page(page: pymupdf.Page) -> PageLayout:
         has_text_layer=has_text_layer,
         boxes=boxes,
     )
+
+
+def analyze_page(page: pymupdf.Page) -> PageLayout:
+    has_text_layer = bool(page.get_text().strip())
+
+    try:
+        model = _get_model()
+    except ImportError:
+        return _analyze_page_heuristic(page, has_text_layer)
+
+    pix = page.get_pixmap(dpi=RENDER_DPI)
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        pix.save(f.name)
+        (result,) = model.predict(f.name, batch_size=1, layout_nms=True)
+
+    return _page_layout_from_predict_result(result, has_text_layer)
+
+
+@lru_cache(maxsize=1)
+def _get_model_onnx():
+    """analyze_page()의 paddle 백엔드 대신 paddlex의 HPI(고성능 추론)
+    플러그인으로 PP-DocLayoutV2를 onnxruntime 백엔드로 돌린다 -- paddlepaddle
+    (~195MB, 별도 인덱스 필요) 대신 ultra-infer-python(~71MB, PyPI 표준
+    의존성만)만 있으면 되는 게 목적. 이 플러그인이 없으면(paddlex --install
+    hpi-cpu 미실행) DependencyError를 던진다 -- analyze_page_onnx()가
+    ImportError와 함께 잡아서 휴리스틱으로 폴백한다.
+
+    아직 라우팅(route_page)이나 pdf.load()의 기본 경로에는 안 실었다 --
+    실제 배포 환경(linux, Databricks)에서 정확도 검증 후 결정할 예정이라
+    별도 함수로만 둔다. 이 모듈은 macOS wheel이 없어 로컬(macOS)에서는
+    HPI 플러그인 자체를 설치할 수 없다 -- 정확도 검증은 linux 환경에서."""
+    import paddlex
+
+    model_dir = layout_model_dir()
+    if not any(model_dir.glob("*")):
+        raise MissingDependencyError(
+            f"PP-DocLayoutV2 weights not found at {model_dir} -- run "
+            "'document-parser download-models' first"
+        )
+    return paddlex.create_model(
+        "PP-DocLayoutV2",
+        model_dir=str(model_dir),
+        use_hpip=True,
+        hpi_config={"backend": "onnxruntime", "device_type": "cpu"},
+    )
+
+
+def analyze_page_onnx(page: pymupdf.Page) -> PageLayout:
+    """analyze_page()와 결과 형태는 동일하지만 onnxruntime(HPI) 백엔드를
+    쓴다 -- paddlepaddle 없이 돌리고 싶을 때의 병렬 경로(_get_model_onnx()
+    참고). 아직 프로덕션 라우팅에는 안 실려 있다."""
+    from paddlex.utils.deps import DependencyError
+
+    has_text_layer = bool(page.get_text().strip())
+
+    try:
+        model = _get_model_onnx()
+    except (ImportError, DependencyError):
+        return _analyze_page_heuristic(page, has_text_layer)
+
+    pix = page.get_pixmap(dpi=RENDER_DPI)
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        pix.save(f.name)
+        (result,) = model.predict(f.name)
+
+    return _page_layout_from_predict_result(result, has_text_layer)
 
 
 def _analyze_page_heuristic(page: pymupdf.Page, has_text_layer: bool) -> PageLayout:
