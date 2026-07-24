@@ -653,13 +653,48 @@ def _gap_fill_boxes(
     return gaps
 
 
+_NESTED_TEXT_THRESHOLD = 0.6
+
+
+def _suppress_nested_text(
+    boxes: _ScoredBoxList, threshold: float = _NESTED_TEXT_THRESHOLD
+) -> _ScoredBoxList:
+    """다른(더 큰) 박스 안에 threshold 비율 이상 포함된 "text" 박스만 제거
+    한다(큰 쪽 라벨은 무관 -- image/table 등) -- V2/V3 병합 결과에도 이미
+    큰 영역으로 잡힌 것 안에 text가 중복으로 잡히는 경우가 있다는 지적에
+    따른 것. _suppress_nested()(시각화 전용 --suppress-nested 옵션)와 달리
+    "제거 대상"을 text로만 한정한다(이미지가 다른 이미지 안에 있는 경우
+    등은 안 건드림) -- VLM을 끄고 V2/V3만으로 병합할 때도 항상 적용한다."""
+    result: _ScoredBoxList = []
+    for i, (label, bbox, score) in enumerate(boxes):
+        if label == "text":
+            area = _bbox_area(bbox)
+            suppressed = any(
+                j != i
+                and _bbox_area(other_bbox) > area
+                and _containment_ratio(bbox, other_bbox) >= threshold
+                for j, (_, other_bbox, _) in enumerate(boxes)
+            )
+            if suppressed:
+                continue
+        result.append((label, bbox, score))
+    return result
+
+
 def render_merged(
-    path: Path, out_dir: Path, suppress_nested: bool = False, nested_threshold: float = 0.8
+    path: Path,
+    out_dir: Path,
+    suppress_nested: bool = False,
+    nested_threshold: float = 0.8,
+    use_vlm_gap_fill: bool = False,
 ) -> Path:
-    """V2 + V3 + VLM을 다 합친 버전 -- 겹치는 영역은 라벨이 같으면 score
-    높은 쪽, 다르면 LLM이 페이지당 한 번에 판정하고, 어느 모델도 못 잡은
-    영역은 VLM 전체 감지 결과에서 보간한다. 세 경로를 각각 다 돌리므로
-    비용/시간이 제일 크다."""
+    """V2 + V3 병합 버전 -- 겹치는 영역은 라벨이 같으면 score 높은 쪽,
+    다르면 LLM이 페이지당 한 번에 판정한다. 병합 결과에서 다른(더 큰) 박스
+    안에 중복으로 잡힌 "text"는 항상 제거한다(_suppress_nested_text).
+    use_vlm_gap_fill=True면 V2/V3 둘 다 놓친 영역을 VLM 전체 감지 결과에서
+    추가로 보간한다 -- 기본은 꺼져 있다(VLM이 빈 공간을 text로 잘못 감지하는
+    경우가 실측으로 확인돼서, 일단 V2/V3만으로 정리한 결과를 우선 확인하기
+    위함)."""
     pdf_bytes = _load_pdf_bytes(path)
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     v2_model = _get_v2_model()
@@ -673,10 +708,13 @@ def render_merged(
         v3_boxes = _v3_boxes_for_page(v3_model, page)
         matched, v2_only, v3_only = _match_v2_v3(v2_boxes, v3_boxes)
         merged = _resolve_conflicts(client, page, v2_boxes, v3_boxes, matched) + v2_only + v3_only
+        merged = _suppress_nested_text(merged)
 
-        vlm_boxes = _vlm_boxes_for_page(client, page)
-        gaps = _gap_fill_boxes(page, vlm_boxes, merged)
-        merged = merged + gaps
+        gaps: _ScoredBoxList = []
+        if use_vlm_gap_fill:
+            vlm_boxes = _vlm_boxes_for_page(client, page)
+            gaps = _gap_fill_boxes(page, vlm_boxes, merged)
+            merged = merged + gaps
 
         boxes: _BoxList = [(label, bbox) for label, bbox, _score in merged]
         if suppress_nested:
@@ -694,7 +732,8 @@ def render_merged(
             file=sys.stderr,
         )
 
-    title = "layout box legend (V2+V3 merged, LLM-arbitrated + VLM gap-fill)"
+    title = "layout box legend (V2+V3 merged, LLM-arbitrated"
+    title += ", VLM gap-fill)" if use_vlm_gap_fill else ", VLM gap-fill off)"
     if suppress_nested:
         title += ", nested boxes suppressed"
     _insert_legend_page(doc, title=title)
@@ -736,9 +775,15 @@ def main() -> None:
         action="store_true",
         help="V2+V3 병합 버전(<파일명>_merged.pdf)도 만듦 -- 겹치는 영역은 "
         "라벨 같으면 score 높은 쪽, 다르면 페이지당 LLM 호출 1회로 판정, "
-        "어느 쪽도 못 잡은 영역은 VLM 전체 감지 결과에서 보간. V2/V3/VLM을 "
-        "전부 내부적으로 다시 돌리므로(--skip-v2/v3/vlm과 무관) 비용/시간이"
-        " 제일 큼",
+        "다른 박스 안에 중복으로 잡힌 text는 항상 제거. 기본은 VLM 보간 "
+        "없이 V2+V3만(--merge-vlm-gapfill로 다시 켤 수 있음)",
+    )
+    parser.add_argument(
+        "--merge-vlm-gapfill",
+        action="store_true",
+        help="--merge에서 V2/V3 둘 다 못 잡은 영역을 VLM 전체 감지 결과에서 "
+        "추가로 보간(text만, 잉크 검증 포함) -- 기본은 꺼져 있음(VLM이 빈 "
+        "공간을 text로 잘못 감지하는 경우가 실측으로 확인돼서 일단 끔)",
     )
     args = parser.parse_args()
 
@@ -755,8 +800,14 @@ def main() -> None:
             print(f"processing {path} (VLM)...", file=sys.stderr)
             render_vlm(path, out_dir, args.suppress_nested, args.nested_threshold)
         if args.merge:
-            print(f"processing {path} (merged V2+V3+VLM)...", file=sys.stderr)
-            render_merged(path, out_dir, args.suppress_nested, args.nested_threshold)
+            print(f"processing {path} (merged V2+V3)...", file=sys.stderr)
+            render_merged(
+                path,
+                out_dir,
+                args.suppress_nested,
+                args.nested_threshold,
+                args.merge_vlm_gapfill,
+            )
 
 
 if __name__ == "__main__":
